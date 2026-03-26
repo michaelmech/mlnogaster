@@ -1,0 +1,130 @@
+# Hill Climbing in Genetic Feature Engineering
+
+## Overview
+
+The hill climbing component is a core part of this feature engineering system. It fundamentally changes the goal of the search process:
+
+> Instead of finding individually strong features, it builds a **coherent, non-redundant feature set**.
+
+This aligns the feature generation process with how models are actually used in practice.
+
+---
+
+## Core Mechanism
+
+Rather than evaluating features independently, hill climbing evaluates **marginal contribution**.
+
+Instead of:
+
+```python
+score = metric(feature, y)
+```
+
+It uses:
+
+```python
+X_new = np.column_stack([X_current, candidate_feature])
+score = hc_metric(X_new, y)
+```
+
+A feature is only accepted if it improves the performance of the **current feature set**.
+
+---
+
+## Why This Matters
+
+### 1. Prevents Redundant Features
+
+Genetic algorithms naturally produce many similar or correlated features.
+
+Hill climbing ensures:
+
+* Features that do not add new information are rejected
+* The final set avoids unnecessary duplication
+
+---
+
+### 2. Enforces Complementarity
+
+Each feature must contribute **incremental value** relative to existing features.
+
+This leads to:
+
+* Diverse signals
+* Better coverage of different patterns in the data
+
+---
+
+### 3. Controls Overfitting at the Search Level
+
+Typical pipelines:
+
+* Generate large numbers of features
+* Rely on model regularization to handle noise
+
+This system:
+
+* Prevents weak features from ever being included
+* Reduces reliance on downstream regularization
+
+---
+
+### 4. Aligns With Real Model Usage
+
+Models are trained on **sets of features**, not individual ones.
+
+Hill climbing ensures the optimization objective reflects this:
+
+```python
+model(X_all_features)
+```
+
+instead of:
+
+```python
+model(single_feature)
+```
+
+---
+
+### 5. Enables Feature Pruning
+
+After accepting a new feature, the system can:
+
+* Re-evaluate existing features
+* Remove any that are no longer useful
+
+This results in:
+
+* A compact feature set
+* Continuous self-correction during search
+
+---
+
+## Conceptual Shift
+
+### Without Hill Climbing
+
+* Independent feature scoring
+* Symbolic regression-style optimization
+* High redundancy risk
+
+### With Hill Climbing
+
+* Incremental feature set construction
+* Greedy structure learning
+* Emphasis on interaction and stability
+
+---
+
+## Key Takeaway
+
+Hill climbing transforms the system from a feature generator into a **feature set optimizer**.
+
+It ensures that:
+
+* Every feature contributes meaningful new information
+* The final feature set is efficient and non-redundant
+* The search process reflects real-world model usage
+
+This is essential for building robust signals in structured, time-dependent data.
