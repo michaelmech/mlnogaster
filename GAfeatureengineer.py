@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import operator
 import random
@@ -29,7 +30,7 @@ from deap import base, creator, tools, gp
 
 Arg = Union[str, "FeatureNode"]
 OpType = Literal["element-wise", "groupby", "time-series", "target_encoding"]
-SearchMode = Literal["ga", "hill_climb", "ga_hill_climb"]
+SearchMode = Literal["ga", "hill_climb"]
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
         maximize_metric: bool = False,
 
-        # Hill-climb metric: used in search_mode="hill_climb" or "ga_hill_climb"
+        # Hill-climb metric: used in search_mode="hill_climb"
         hc_metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
         maximize_hc_metric: Optional[bool] = None,
 
@@ -107,13 +108,9 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         early_stop_rounds: Optional[int] = 7,
         early_stop_tol: float = 1e-6,
 
-        # hill-climb knobs (still apply in ga_hill_climb)
-        hc_max_steps: int = 25,
-        hc_num_gp_candidates: int = 50,
-        hc_include_identity_candidates: bool = True,
+        # hill-climb knobs
         hc_start_with_one_identity: bool = True,
         hc_prune: bool = True,
-        hc_patience: int = 5,
         hc_tol: float = 1e-12,
 
         checkpoint_path=None,
@@ -183,12 +180,8 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         self._te_target_col: Optional[str] = None
 
         # hill climb knobs
-        self.hc_max_steps = int(hc_max_steps)
-        self.hc_num_gp_candidates = int(hc_num_gp_candidates)
-        self.hc_include_identity_candidates = bool(hc_include_identity_candidates)
         self.hc_start_with_one_identity = bool(hc_start_with_one_identity)
         self.hc_prune = bool(hc_prune)
-        self.hc_patience = int(hc_patience)
         self.hc_tol = float(hc_tol)
 
         # outputs
@@ -245,7 +238,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         return new_score < (old_score - self.hc_tol)
 
     # -------------------------
-    # GA-backed hill climbing
+    # Hill climbing
     # -------------------------
     @dataclass
     class _HCState:
@@ -260,14 +253,45 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         expr = f"el__identity(num__{col})"
         return creator.Individual(gp.PrimitiveTree.from_string(expr, self._pset))
 
-    def _fit_ga_hill_climb(
+    def _checkpoint_write_due(self, accepted_count: int) -> bool:
+        if self.checkpoint_path is None:
+            return False
+        every = self.checkpoint_every_accepts
+        if every is None:
+            return False
+        try:
+            every_f = float(every)
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(every_f) or every_f <= 0:
+            return False
+        every_i = int(every_f)
+        return accepted_count > 0 and (accepted_count % every_i == 0)
+
+    def _load_checkpoint_file(self) -> Optional[dict]:
+        if self.checkpoint_path is None:
+            return None
+        if not os.path.exists(self.checkpoint_path):
+            return None
+        try:
+            with open(self.checkpoint_path, "r") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if "selected_programs" not in data or "best_score" not in data:
+            return None
+        return data
+
+    def _fit_hill_climb(
           self,
           df: pl.DataFrame,
           y_np: np.ndarray,
 
       ) -> "GAFeatureEngineerDEAP":
 
-        """Hybrid mode:
+        """Hill-climb mode:
         - GA generates candidates via evolution.
         - Evaluation uses HC metric incrementally (add candidate feature to current selected set).
         - Acceptance updates the HC state (selected feature set).
@@ -289,12 +313,9 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
             return np.column_stack(cols) if cols else np.empty((df.height, 0), dtype=float)
 
 
-        if self.checkpoint_path is not None:
+        resume_checkpoint = self._load_checkpoint_file()
+        if resume_checkpoint is not None:
             # Rebuild accepted features from their string programs
-            with open(self.checkpoint_path, "r") as f:
-              resume_checkpoint = json.load(f)
-
-
             selected_inds = [
                   creator.Individual(
                       gp.PrimitiveTree.from_string(
@@ -315,7 +336,6 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
 
             mask = np.isfinite(y_np) & np.all(np.isfinite(best_X), axis=1)
             best_score = self._hc_score(best_X[mask], y_np[mask])
-            print(best_score)
 
 
             no_improve0 = int(resume_checkpoint.get("no_improve", 0))
@@ -412,7 +432,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
 
 
                                # inside _eval_hc, after acceptance + optional prune
-                if self.checkpoint_path is not None and (accepted_count % self.checkpoint_every_accepts == 0):
+                if self._checkpoint_write_due(accepted_count):
                     with open(self.checkpoint_path, "w") as f:
                         json.dump(self.get_hc_checkpoint(), f)
 
@@ -465,7 +485,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
                 if no_improve_ga >= self.early_stop_rounds:
                     break
 
-        # ---- store hybrid outputs ----
+        # ---- store outputs ----
         self.hof_ = hof
         self.best_programs_ = [str(ind) for ind in hof]
         self.best_fitness_ = [float(ind.fitness.values[0]) for ind in hof]
@@ -519,27 +539,23 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         self._toolbox = None
         self._ensure_deap()
 
-        if self.search_mode in ("hill_climb", "ga_hill_climb"):
+        allowed_modes = {"ga", "hill_climb"}
+        if self.search_mode not in allowed_modes:
+            raise ValueError(f"search_mode must be one of {sorted(allowed_modes)}")
+
+        if self.search_mode == "hill_climb":
             # smoke test: hc_metric signature
             if self.hc_metric is None:
-                raise ValueError("hc_metric must be provided when search_mode is hill_climb or ga_hill_climb.")
+                raise ValueError("hc_metric must be provided when search_mode is hill_climb.")
             try:
                 _ = float(self.hc_metric(np.zeros((len(y_np), 1)), y_np))
             except TypeError as e:
                 raise TypeError(
-                    "In hill climbing modes, hc_metric must have signature hc_metric(X, y)."
+                    "In hill_climb mode, hc_metric must have signature hc_metric(X, y)."
                 ) from e
 
         if self.search_mode == "hill_climb":
-            return self._fit_hill_climb(df, y_np)  # keep your existing implementation
-
-        if self.search_mode == "ga_hill_climb":
-
-            return self._fit_ga_hill_climb(
-                df,
-                y_np,
-
-            )
+            return self._fit_hill_climb(df, y_np)
 
         # --------------------
         # Pure GA mode (unchanged): metric(y, y_pred)
@@ -631,7 +647,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         return self
 
     # -------------------------
-    # transform(): keep your existing logic, but in ga_hill_climb we emit selected HC features
+    # transform(): in hill_climb mode, emit selected HC features
     # -------------------------
     def transform(self, X: Any) -> pl.DataFrame:
         df = self._to_polars(X)
@@ -640,7 +656,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
 
         self._ensure_deap()
 
-        if self.search_mode in ("hill_climb", "ga_hill_climb"):
+        if self.search_mode == "hill_climb":
             if not getattr(self, "_hc_selected_inds_", None):
                 raise RuntimeError("Call fit(X, y) before transform().")
 
@@ -1253,13 +1269,6 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
 
 
     def _ensure_deap(self):
-
-        import builtins
-
-        def _create_lit(x: float) -> NumE:
-            return NumE(pl.lit(x))
-
-        builtins._create_lit = _create_lit
 
         if self._pset is None:
             self._pset = self._build_pset()
