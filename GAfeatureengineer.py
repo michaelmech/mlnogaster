@@ -1,5 +1,8 @@
+import json
+import re
 import operator
 import random
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, Literal
 
@@ -113,10 +116,17 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         hc_patience: int = 5,
         hc_tol: float = 1e-12,
 
+        checkpoint_path=None,
+        checkpoint_every_accepts =np.inf,
+
         # new
         search_mode: SearchMode = "ga",
         verbose: bool = False,
     ):
+
+
+        self.checkpoint_path=checkpoint_path
+        self.checkpoint_every_accepts=checkpoint_every_accepts
         self.index_cols = index_cols
         self.categorical_cols = list(categorical_cols) if categorical_cols else []
         self.numeric_cols = list(numeric_cols) if numeric_cols else []
@@ -250,7 +260,13 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         expr = f"el__identity(num__{col})"
         return creator.Individual(gp.PrimitiveTree.from_string(expr, self._pset))
 
-    def _fit_ga_hill_climb(self, df: pl.DataFrame, y_np: np.ndarray) -> "GAFeatureEngineerDEAP":
+    def _fit_ga_hill_climb(
+          self,
+          df: pl.DataFrame,
+          y_np: np.ndarray,
+
+      ) -> "GAFeatureEngineerDEAP":
+
         """Hybrid mode:
         - GA generates candidates via evolution.
         - Evaluation uses HC metric incrementally (add candidate feature to current selected set).
@@ -259,41 +275,83 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         """
         self._ensure_deap()
 
-        # ---- init HC state (same idea as your old hill climb) ----
-        remaining_identity = set(self.numeric_cols)
-        selected_inds: List[Any] = []
-        selected_names: List[str] = []
+        def _patch_legacy_constants(expr: str) -> str:
+          # Replace bare legacy token "_create_lit" with a callable literal
+          return re.sub(
+              r'(?<![\w])_create_lit(?!\s*\()',
+              "_create_lit(0.0)",
+              expr
+          )
 
-        if self.hc_start_with_one_identity and remaining_identity:
-            c0 = self._rng.choice(list(remaining_identity))
-            ind0 = self._make_identity_individual(c0)
-            selected_inds.append(ind0)
-            selected_names.append(str(ind0))
-            remaining_identity.remove(c0)
-
-        if not selected_inds:
-            if not remaining_identity:
-                raise ValueError("No numeric columns available for hill-climb.")
-            c0 = self._rng.choice(list(remaining_identity))
-            ind0 = self._make_identity_individual(c0)
-            selected_inds.append(ind0)
-            selected_names.append(str(ind0))
-            remaining_identity.remove(c0)
-
+        # ---- init HC state (supports resume) ----
         def build_X(ind_list: List[Any]) -> np.ndarray:
             cols = [self._program_to_numpy(df, ind) for ind in ind_list]
             return np.column_stack(cols) if cols else np.empty((df.height, 0), dtype=float)
 
-        best_X = build_X(selected_inds)
-        best_score = self._hc_score(best_X, y_np)
+
+        if self.checkpoint_path is not None:
+            # Rebuild accepted features from their string programs
+            with open(self.checkpoint_path, "r") as f:
+              resume_checkpoint = json.load(f)
+
+
+            selected_inds = [
+                  creator.Individual(
+                      gp.PrimitiveTree.from_string(
+                          _patch_legacy_constants(expr),
+                          self._pset
+                      )
+                  )
+                  for expr in resume_checkpoint["selected_programs"]
+              ]
+
+
+
+            selected_names = list(resume_checkpoint["selected_programs"])
+
+
+            best_X = build_X(selected_inds)
+            best_score = float(resume_checkpoint["best_score"])
+
+            mask = np.isfinite(y_np) & np.all(np.isfinite(best_X), axis=1)
+            best_score = self._hc_score(best_X[mask], y_np[mask])
+            print(best_score)
+
+
+            no_improve0 = int(resume_checkpoint.get("no_improve", 0))
+        else:
+            remaining_identity = set(self.numeric_cols)
+            selected_inds: List[Any] = []
+            selected_names: List[str] = []
+
+            if self.hc_start_with_one_identity and remaining_identity:
+                c0 = self._rng.choice(list(remaining_identity))
+                ind0 = self._make_identity_individual(c0)
+                selected_inds.append(ind0)
+                selected_names.append(str(ind0))
+                remaining_identity.remove(c0)
+
+            if not selected_inds:
+                if not remaining_identity:
+                    raise ValueError("No numeric columns available for hill-climb.")
+                c0 = self._rng.choice(list(remaining_identity))
+                ind0 = self._make_identity_individual(c0)
+                selected_inds.append(ind0)
+                selected_names.append(str(ind0))
+                remaining_identity.remove(c0)
+
+            best_X = build_X(selected_inds)
+            best_score = self._hc_score(best_X, y_np)
+            no_improve0 = 0
 
         state = GAFeatureEngineerDEAP._HCState(
             selected_inds=selected_inds,
             selected_names=selected_names,
             best_X=best_X,
             best_score=best_score,
-            no_improve=0,
+            no_improve=no_improve0,
         )
+
 
         # ---- DEAP fitness: based on HC metric for THIS individual (incremental) ----
         def _eval_hc(individual):
@@ -316,6 +374,7 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
                 state.best_X = X_try
                 state.best_score = sc
                 state.no_improve = 0
+
 
                 # optional prune (same semantics as your original)
                 if self.hc_prune and len(state.selected_inds) > 1:
@@ -342,6 +401,20 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
                                 state.best_score = sc2
                                 changed = True
                                 break
+
+                accepted_count = len(state.selected_inds)
+
+                # After acceptance + optional prune, sync HC state onto self so get_hc_checkpoint() works
+                self._hc_selected_inds_ = list(state.selected_inds)
+                self.selected_programs_ = list(state.selected_names)
+                self.selected_fitness_ = float(state.best_score)
+                self._hc_no_improve_ = int(state.no_improve)
+
+
+                               # inside _eval_hc, after acceptance + optional prune
+                if self.checkpoint_path is not None and (accepted_count % self.checkpoint_every_accepts == 0):
+                    with open(self.checkpoint_path, "w") as f:
+                        json.dump(self.get_hc_checkpoint(), f)
 
             # translate to DEAP FitnessMin
             fit_val = -sc if self.maximize_hc_metric else sc
@@ -409,12 +482,22 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         self._hc_selected_inds_ = list(state.selected_inds)
 
         self._fitted = True
+        if self.checkpoint_path is not None:
+          with open(self.checkpoint_path, "w") as f:
+              json.dump(self.get_hc_checkpoint(), f)
+
         return self
 
     # -------------------------
     # fit(): route modes
     # -------------------------
-    def fit(self, X: Any, y: Any, target_col: Optional[str] = None) -> "GAFeatureEngineerDEAP":
+    def fit(
+            self,
+            X: Any,
+            y: Any,
+            target_col: Optional[str] = None,
+        ):
+
         df = self._to_polars(X)
         self.numeric_cols = self._infer_numeric_cols(df)
 
@@ -451,7 +534,12 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
             return self._fit_hill_climb(df, y_np)  # keep your existing implementation
 
         if self.search_mode == "ga_hill_climb":
-            return self._fit_ga_hill_climb(df, y_np)
+
+            return self._fit_ga_hill_climb(
+                df,
+                y_np,
+
+            )
 
         # --------------------
         # Pure GA mode (unchanged): metric(y, y_pred)
@@ -708,3 +796,531 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
             keep = max(8, self.max_colname_len - (2 + len(suffix)))
             s = f"{s[:keep]}__{suffix}"
         return s
+
+
+
+    def _individual_to_symbolic(self, individual) -> str:
+        """
+        Convert a DEAP Individual / PrimitiveTree into a human-readable symbolic string
+        using the registered formatter functions.
+        """
+        # DEAP Individuals are iterable over nodes (Primitive / Terminal)
+        nodes = list(individual)
+        stack: list[str] = []
+
+        for node in reversed(nodes):  # process prefix tree right-to-left
+            if isinstance(node, gp.Terminal):
+                # Terminals in typed GP often stringify to their "name" already.
+                # If yours stringify to something verbose, you can use node.name when available.
+                stack.append(str(node.name))
+                continue
+
+            if isinstance(node, gp.Primitive):
+                args = [stack.pop() for _ in range(node.arity)]  # already left->right
+                op_name = node.name.split("__", 1)[1] if "__" in node.name else node.name
+
+                if node.name.startswith("el__"):
+                    spec = self._ops_elementary.get(op_name)
+                elif node.name.startswith("gb__"):
+                    spec = self._ops_groupby.get(op_name)
+                elif node.name.startswith("ts__"):
+                    spec = self._ops_ts.get(op_name)
+                elif node.name.startswith("te__"):
+                    spec = self._ops_target.get(op_name)
+                else:
+                    spec = None
+
+                if spec is not None:
+                    stack.append(spec.formatter(args, {}))
+                else:
+                    stack.append(f"{op_name}({', '.join(args)})")
+                continue
+
+            raise TypeError(f"Unknown node type inside tree: {type(node)}")
+
+        if len(stack) != 1:
+            # If this triggers, something is inconsistent in the tree representation.
+            raise ValueError(f"Could not render individual; stack={stack}")
+
+        return stack[0]
+
+    def _register_default_ops(self) -> None:
+        def fmt(name: str, args: List[str], params: Dict[str, Any]) -> str:
+            if not params:
+                return f"{name}({', '.join(args)})"
+            p = ",".join([f"{k}={params[k]}" for k in sorted(params)])
+            return f"{name}[{p}]({', '.join(args)})"
+
+        def safe_div(a: pl.Expr, b: pl.Expr, eps: float = 1e-12) -> pl.Expr:
+            return pl.when(b.abs() > eps).then(a / b).otherwise(None)
+
+        def rolling_min_key(method: Callable) -> str:
+            params = set(inspect.signature(method).parameters.keys())
+            return "min_samples" if "min_samples" in params else "min_periods"
+
+        # ---- elementary ----
+        self.add_elementary_op("add", 2, builder=lambda eng, a, p: a[0] + a[1], formatter=lambda args, p: fmt("add", args, p))
+        self.add_elementary_op("sub", 2, builder=lambda eng, a, p: a[0] - a[1], formatter=lambda args, p: fmt("sub", args, p))
+        self.add_elementary_op("mul", 2, builder=lambda eng, a, p: a[0] * a[1], formatter=lambda args, p: fmt("mul", args, p))
+        self.add_elementary_op("div", 2, builder=lambda eng, a, p: safe_div(a[0], a[1]), formatter=lambda args, p: fmt("div", args, p))
+        self.add_elementary_op("neg", 1, builder=lambda eng, a, p: -a[0], formatter=lambda args, p: fmt("neg", args, p))
+        self.add_elementary_op("abs", 1, builder=lambda eng, a, p: a[0].abs(), formatter=lambda args, p: fmt("abs", args, p))
+        self.add_elementary_op("sqrt_abs", 1, builder=lambda eng, a, p: a[0].abs().sqrt(), formatter=lambda args, p: fmt("sqrt_abs", args, p))
+        self.add_elementary_op("log1p_abs", 1, builder=lambda eng, a, p: a[0].abs().log1p(), formatter=lambda args, p: fmt("log1p_abs", args, p))
+        self.add_elementary_op("clip", 1, builder=lambda eng, a, p: a[0].clip(p.get("lo", -3.0), p.get("hi", 3.0)), formatter=lambda args, p: fmt("clip", args, p))
+
+        self.add_elementary_op(
+            "identity", 1,
+            builder=lambda eng, a, p: a[0],
+            formatter=lambda args, p: fmt("identity", args, p),
+        )
+
+        # ---- groupby (defaults to date group) ----
+        self.add_groupby_op("cs_rank", 1,
+            builder=lambda eng, a, p: a[0].rank(method=p.get("method","average"), descending=p.get("descending",True))
+                                  .over(p.get("group_col", eng.index_cols[1])),
+            formatter=lambda args, p: fmt("cs_rank", args, p),
+        )
+
+        self.add_groupby_op("cs_zscore", 1,
+            builder=lambda eng, a, p: safe_div(
+                (a[0] - a[0].mean().over(p.get("group_col", eng.index_cols[1]))),
+                a[0].std().over(p.get("group_col", eng.index_cols[1]))
+            ),
+            formatter=lambda args, p: fmt("cs_zscore", args, p),
+        )
+        self.add_groupby_op("grp_mean", 1,
+            builder=lambda eng, a, p: a[0].mean().over(p.get("group_col", eng.index_cols[1])),
+            formatter=lambda args, p: fmt("grp_mean", args, p),
+        )
+
+        # ---- time-series (over ticker) ----
+        min_key = rolling_min_key(pl.Expr.rolling_mean)
+
+        def ts_over_ticker(expr: pl.Expr, eng: "GAFeatureEngineerDEAP") -> pl.Expr:
+            return expr.over(eng.index_cols[0])
+
+        self.add_ts_op("ts_lag", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].shift(int(p.get("n",1))), eng),
+                      formatter=lambda args, p: fmt("ts_lag", args, p))
+        self.add_ts_op("ts_diff", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].diff(int(p.get("n",1))), eng),
+                      formatter=lambda args, p: fmt("ts_diff", args, p))
+        self.add_ts_op("ts_pct_change", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].pct_change(int(p.get("n",1))), eng),
+                      formatter=lambda args, p: fmt("ts_pct_change", args, p))
+        self.add_ts_op("ts_mean", 1, builder=lambda eng, a, p: ts_over_ticker(
+                          a[0].rolling_mean(window_size=int(p.get("window",5)), **{min_key:int(p.get("min_samples",1))}), eng),
+                      formatter=lambda args, p: fmt("ts_mean", args, p))
+        self.add_ts_op("ts_std", 1, builder=lambda eng, a, p: ts_over_ticker(
+                          a[0].rolling_std(window_size=int(p.get("window",5)), **{min_key:int(p.get("min_samples",2))}), eng),
+                      formatter=lambda args, p: fmt("ts_std", args, p))
+        self.add_ts_op("ts_ewm_mean", 1, builder=lambda eng, a, p: ts_over_ticker(
+                          a[0].ewm_mean(span=float(p.get("span",10.0)), adjust=bool(p.get("adjust",False)), ignore_nulls=bool(p.get("ignore_nulls",False))), eng),
+                      formatter=lambda args, p: fmt("ts_ewm_mean", args, p))
+
+        if self.enable_impostor_op:
+            self.add_elementary_op(
+                "impostor_noise", 0,
+                builder=lambda eng, a, p: eng._impostor_expr(seed=int(p.get("seed", eng.random_state))),
+                formatter=lambda args, p: fmt("impostor_noise", [], p),
+            )
+
+
+    def _new_tmp_col(self, base: str) -> str:
+      self._tmp_col_counter += 1
+      return self._safe_ident(f"__tmp__{base}__{self._tmp_col_counter}")
+
+    # -------------------------
+    # KEEP create_operator SYNTAX + 4 OP TYPES
+    # -------------------------
+    def create_operator(
+        self,
+        operator_function: Callable[..., pl.Expr],
+        arity: int,
+        name: str,
+        operator_type: OpType,
+        cat_col_args: Optional[List[int]] = None,
+        num_col_args: Optional[List[int]] = None,
+        target_col_arg: Optional[int] = None,
+    ) -> None:
+        cat_col_args = cat_col_args or []
+        num_col_args = num_col_args or []
+
+        allowed: set[str] = {"element-wise", "groupby", "time-series", "target_encoding"}
+        if operator_type not in allowed:
+            raise ValueError(f"operator_type must be one of {sorted(allowed)}")
+        if not isinstance(arity, int) or arity < 0:
+            raise ValueError("arity must be a non-negative int")
+
+        all_pos = list(cat_col_args) + list(num_col_args)
+        if target_col_arg is not None:
+            all_pos.append(target_col_arg)
+
+        for p in all_pos:
+            if not isinstance(p, int):
+                raise TypeError("arg positions must be integers (0-based)")
+            if p < 0 or p >= arity:
+                raise ValueError(f"arg position {p} out of bounds for arity={arity}")
+        if len(set(all_pos)) != len(all_pos):
+            raise ValueError("cat/num/target arg positions must be disjoint")
+
+        # guards to preserve your conceptual op types
+        if operator_type == "element-wise":
+            if cat_col_args:
+                raise ValueError("element-wise ops cannot use categorical args")
+            if target_col_arg is not None:
+                raise ValueError("element-wise ops cannot use target_col_arg")
+
+        if operator_type == "groupby":
+            if target_col_arg is not None:
+                raise ValueError("groupby ops cannot use target_col_arg")
+            if len(cat_col_args) == 0:
+                raise ValueError("groupby ops must have at least one categorical arg (group key)")
+            if len(num_col_args) == 0:
+                raise ValueError("groupby ops must have at least one numeric arg (value)")
+
+        if operator_type == "time-series":
+            if cat_col_args:
+                raise ValueError("time-series ops cannot use categorical args (initially)")
+            if target_col_arg is not None:
+                raise ValueError("time-series ops cannot use target_col_arg")
+
+        if operator_type == "target_encoding":
+            if target_col_arg is None:
+                raise ValueError("target_encoding ops must set target_col_arg")
+            if len(cat_col_args) == 0:
+                raise ValueError("target_encoding ops must have at least one categorical arg")
+
+        spec = OperatorSpec(
+            name=name,
+            arity=arity,
+            operator_type=operator_type,
+            fn=operator_function,
+            cat_pos=tuple(cat_col_args),
+            num_pos=tuple(num_col_args),
+            target_pos=target_col_arg,
+        )
+        self._custom_ops[name] = spec
+
+        kind_map = {
+            "element-wise": "elementary",
+            "groupby": "groupby",
+            "time-series": "ts",
+            "target_encoding": "target",
+        }
+        kind = kind_map[operator_type]
+
+        def _builder(eng: "GAFeatureEngineerDEAP", arg_exprs: List[pl.Expr], p: Dict[str, Any]) -> pl.Expr:
+            kwargs = {k: v for k, v in p.items() if k != "bound_cols"}
+            return operator_function(*arg_exprs, **kwargs)
+
+        def _formatter(args: List[str], p: Dict[str, Any]) -> str:
+            pp = {k: v for k, v in p.items() if k != "bound_cols"}
+            if not pp:
+                return f"{name}({', '.join(args)})"
+            param_str = ",".join([f"{k}={pp[k]}" for k in sorted(pp)])
+            return f"{name}[{param_str}]({', '.join(args)})"
+
+        self.add_custom_operation(
+            name=name,
+            arity=arity,
+            kind=kind,
+            builder=_builder,
+            formatter=_formatter,
+            restrict_group_cols_to_categoricals=(operator_type == "groupby"),
+        )
+
+        # new primitives => rebuild pset/toolbox next time
+        self._pset = None
+        self._toolbox = None
+
+    # registry helpers
+    def add_elementary_op(self, name: str, arity: int, builder, formatter) -> None:
+        self._ops_elementary[name] = OperationSpec(name=name, arity=arity, kind="elementary", builder=builder, formatter=formatter)
+
+    def add_groupby_op(self, name: str, arity: int, builder, formatter, restrict_group_cols_to_categoricals: bool = False) -> None:
+        self._ops_groupby[name] = OperationSpec(name=name, arity=arity, kind="groupby", builder=builder, formatter=formatter,
+                                                restrict_group_cols_to_categoricals=restrict_group_cols_to_categoricals)
+
+    def add_ts_op(self, name: str, arity: int, builder, formatter) -> None:
+        self._ops_ts[name] = OperationSpec(name=name, arity=arity, kind="ts", builder=builder, formatter=formatter)
+
+    def add_target_op(self, name: str, arity: int, builder, formatter) -> None:
+        self._ops_target[name] = OperationSpec(name=name, arity=arity, kind="target", builder=builder, formatter=formatter)
+
+    def add_custom_operation(self, name: str, arity: int, kind: str, builder, formatter=None, restrict_group_cols_to_categoricals: bool = False) -> None:
+        if formatter is None:
+            formatter = lambda args, p: f"{name}({', '.join(args)})"
+        if kind == "elementary":
+            self.add_elementary_op(name, arity, builder, formatter)
+        elif kind == "groupby":
+            self.add_groupby_op(name, arity, builder, formatter, restrict_group_cols_to_categoricals)
+        elif kind == "ts":
+            self.add_ts_op(name, arity, builder, formatter)
+        elif kind == "target":
+            self.add_target_op(name, arity, builder, formatter)
+        else:
+            raise ValueError("kind must be one of: elementary, groupby, ts, target")
+
+    # -------------------------
+    # Target encoding: turned into GP primitives automatically
+    # -------------------------
+    def _te_colname(self, cat_col: str, target_col: str) -> str:
+        return f"__te__mean__{cat_col}__{target_col}"
+
+    # -------------------------
+    # DEAP primitive set build
+    # -------------------------
+    def _safe_ident(self, s: str) -> str:
+        s2 = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in str(s))
+        if not s2 or s2[0].isdigit():
+            s2 = "c_" + s2
+        return s2
+
+    def _build_pset(self) -> gp.PrimitiveSetTyped:
+        """
+        Build a typed DEAP primitive set that produces a NumE (numeric Polars expression).
+
+        Key points:
+          - Column references must be *terminals* (pset.addTerminal), not 0-arity primitives.
+          - Random constants should be *ephemeral terminals* (pset.addEphemeralConstant).
+          - Operators remain primitives returning NumE.
+        """
+        # No GP input args: compiled programs are called with no parameters
+        pset = gp.PrimitiveSetTyped("MAIN", [], NumE)
+
+        # -------------------------
+        # Terminals: numeric columns
+        # -------------------------
+        for c in self.numeric_cols:
+            term = NumE(pl.col(c).cast(pl.Float64))
+            pset.addTerminal(term, NumE, name=self._safe_ident(f"num__{c}"))
+
+
+        # -----------------------------
+        # Terminals: categorical columns
+        # -----------------------------
+        for c in self.categorical_cols:
+            term = CatE(pl.col(c).cast(pl.Utf8))
+            pset.addTerminal(term, CatE, name=self._safe_ident(f"cat__{c}"))
+
+
+        # 1. Helper function that runs during eval() to create the actual NumE
+        def _create_lit(x: float) -> NumE:
+            return NumE(pl.lit(x))
+
+        # Register it in the pset context so the compiled code can find it
+        pset.context["_create_lit"] = _create_lit
+
+        # 2. Wrapper class to control the string representation
+        class LiteralWrapper:
+            def __init__(self, val: float):
+                self.val = val
+
+            def __str__(self):
+                return f"_create_lit({self.val})"
+
+            __repr__ = __str__
+
+        # 3. Add ephemeral constant returning the wrapper, but typed as NumE
+        pset.addEphemeralConstant(
+            "const",
+            lambda: LiteralWrapper(self._rng.uniform(-1.0, 1.0)),
+            NumE,
+        )
+
+        # -------------------------
+        # Helper to add operations
+        # -------------------------
+        def add_op(
+            tag: str,
+            op: OperationSpec,
+            arg_tys: List[type],
+            default_params: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            dp = dict(default_params or {})
+
+            def _is_literal_expr(e: pl.Expr) -> bool:
+                """
+                True if this expr references no root columns (e.g. pl.lit(0.5)).
+                We use Polars meta introspection when available.
+                """
+                try:
+                    # For literal-only expressions, root_names() is empty
+                    return len(e.meta.root_names()) == 0
+                except Exception:
+                    # If Polars meta isn't available/compatible, fall back to False
+                    # (you can switch this to True for maximum safety at the cost of more temp cols)
+                    return False
+
+            def _prim(*args):
+                # args are NumE/CatE wrappers
+                pre_cols: List[Tuple[str, pl.Expr]] = []
+                expr_args: List[pl.Expr] = []
+
+                for a in args:
+                    if isinstance(a, NumE):
+                        pre_cols.extend(list(a.pre_cols))
+                        expr_args.append(a.expr)
+                    else:  # CatE
+                        expr_args.append(a.expr)
+
+                # ------------------------------------------------------------
+                # FIX: Polars cannot aggregate/window on a pure literal.
+                # If a ts/groupby op gets a literal argument, materialize it as
+                # a temporary column first, then pass pl.col(tmp) to the builder.
+                # ------------------------------------------------------------
+                if op.kind in ("ts", "groupby"):
+                    for j, ex in enumerate(expr_args):
+                        if _is_literal_expr(ex):
+                            tmp_in = self._new_tmp_col(f"{tag}__{op.name}__arg{j}")
+                            pre_cols.append((tmp_in, ex))
+                            expr_args[j] = pl.col(tmp_in)
+
+                expr = op.builder(self, expr_args, dp)
+
+                # MATERIALIZE: treat ts + groupby ops as staged expressions
+                if op.kind in ("ts", "groupby"):
+                    tmp = self._new_tmp_col(f"{tag}__{op.name}")
+                    pre_cols.append((tmp, expr))
+                    return NumE(pl.col(tmp), tuple(pre_cols))
+
+                return NumE(expr, tuple(pre_cols))
+
+            name = self._safe_ident(f"{tag}__{op.name}")
+            pset.addPrimitive(_prim, arg_tys, NumE, name=name)
+
+        # -------------------------
+        # Element-wise ops (NumE -> NumE)
+        # -------------------------
+        for op in self._ops_elementary.values():
+            add_op("el", op, [NumE] * op.arity)
+
+        # -------------------------
+        # Groupby ops
+        #   - built-ins numeric-only
+        #   - custom groupby ops respect Cat/Num positions
+        # -------------------------
+        for op in self._ops_groupby.values():
+            if (
+                op.name in self._custom_ops
+                and self._custom_ops[op.name].operator_type == "groupby"
+            ):
+                spec = self._custom_ops[op.name]
+                arg_tys = [(CatE if i in spec.cat_pos else NumE) for i in range(spec.arity)]
+                add_op("gb", op, arg_tys)
+            else:
+                add_op("gb", op, [NumE] * op.arity)
+
+        # -------------------------
+        # Time-series ops (numeric-only)
+        # -------------------------
+        ts_defaults = {
+            "ts_lag": {"n": 1},
+            "ts_diff": {"n": 1},
+            "ts_pct_change": {"n": 1},
+            "ts_mean": {"window": 5, "min_samples": 1},
+            "ts_std": {"window": 5, "min_samples": 2},
+            "ts_ewm_mean": {"span": 10.0, "adjust": False, "ignore_nulls": True},
+        }
+        for op in self._ops_ts.values():
+            add_op("ts", op, [NumE] * op.arity, default_params=ts_defaults.get(op.name, {}))
+
+        # -------------------------
+        # Target-encoding terminals + custom TE ops
+        # -------------------------
+        # These TE columns exist only after fit() has built self._te_maps; at that point
+        # we can expose them as numeric terminals.
+        if self._te_target_col is not None and self._te_maps:
+            for cat in self.categorical_cols:
+                tec = self._te_colname(cat, self._te_target_col)
+                # Terminal that references the materialized TE column
+                pset.addTerminal(
+                    NumE(pl.col(tec).cast(pl.Float64)),
+                    NumE,
+                    name=self._safe_ident(f"te_mean__{cat}"),
+                )
+
+        # Custom target_encoding ops: typed via cat/num/target slots
+        for op in self._ops_target.values():
+            if (
+                op.name in self._custom_ops
+                and self._custom_ops[op.name].operator_type == "target_encoding"
+            ):
+                spec = self._custom_ops[op.name]
+                arg_tys = [(CatE if i in spec.cat_pos else NumE) for i in range(spec.arity)]
+                add_op("te", op, arg_tys)
+
+        return pset
+
+
+    def _ensure_deap(self):
+
+        import builtins
+
+        def _create_lit(x: float) -> NumE:
+            return NumE(pl.lit(x))
+
+        builtins._create_lit = _create_lit
+
+        if self._pset is None:
+            self._pset = self._build_pset()
+
+        if self._toolbox is None:
+            # global creator registry (avoid redef)
+            if not hasattr(creator, "FitnessMin"):
+                creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+            if not hasattr(creator, "Individual"):
+                creator.create("Individual", gp.PrimitiveTree, fitness=creator.FitnessMin)
+
+            toolbox = base.Toolbox()
+            toolbox.register("expr", gp.genHalfAndHalf, pset=self._pset, min_=self.init_min_depth, max_=self.init_max_depth)
+            toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.expr)
+            toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+            toolbox.register("select", tools.selTournament, tournsize=self.tournament_size)
+            toolbox.register("mate", gp.cxOnePoint)
+            toolbox.register("expr_mut", gp.genFull, min_=0, max_=2)
+            toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr_mut, pset=self._pset)
+
+            toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=self.max_tree_height))
+            toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=self.max_tree_height))
+
+            self._toolbox = toolbox
+
+
+    def get_hc_checkpoint(self) -> dict:
+        if not hasattr(self, "_hc_selected_inds_"):
+
+            raise RuntimeError("No hill-climb state to checkpoint.")
+
+        return {
+            "selected_programs": [str(ind) for ind in self._hc_selected_inds_],
+            "best_score": float(self.selected_fitness_),
+            "no_improve": getattr(self, "_hc_no_improve_", 0),
+        }
+
+
+    def load_hc_checkpoint(self, checkpoint: dict, df: pl.DataFrame, y_np: np.ndarray):
+        self._ensure_deap()
+
+        inds = [
+            creator.Individual(
+                gp.PrimitiveTree.from_string(expr, self._pset)
+            )
+            for expr in checkpoint["selected_programs"]
+        ]
+
+        def build_X(ind_list):
+            cols = [self._program_to_numpy(df, ind) for ind in ind_list]
+            return np.column_stack(cols) if cols else np.empty((df.height, 0))
+
+        X = build_X(inds)
+        score = checkpoint["best_score"]
+
+        self._hc_selected_inds_ = inds
+        self.selected_programs_ = checkpoint["selected_programs"]
+        self.selected_feature_names_ = self._dedupe_names(
+            [self._sanitize_feature_name(self._individual_to_symbolic(ind)) for ind in inds]
+        )
+        self.selected_fitness_ = score
+
+        return X, score
