@@ -3,9 +3,8 @@ import os
 import re
 import operator
 import random
-import inspect
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, Literal
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -28,51 +27,16 @@ except Exception:  # pragma: no cover
 
 from deap import base, creator, tools, gp
 
-Arg = Union[str, "FeatureNode"]
-OpType = Literal["element-wise", "groupby", "time-series", "target_encoding"]
-SearchMode = Literal["ga", "hill_climb"]
-
-
-@dataclass(frozen=True)
-class OperatorSpec:
-    name: str
-    arity: int
-    operator_type: OpType
-    fn: Callable
-    cat_pos: tuple[int, ...]
-    num_pos: tuple[int, ...]
-    target_pos: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class OperationSpec:
-    name: str
-    arity: int
-    kind: str
-    builder: Callable[["GAFeatureEngineerDEAP", List[pl.Expr], Dict[str, Any]], pl.Expr]
-    formatter: Callable[[List[str], Dict[str, Any]], str]
-    requires_group_col: bool = False
-    restrict_group_cols_to_categoricals: bool = False
-
-
-@dataclass
-class FeatureNode:
-    op_token: str
-    op_name: str
-    args: List[Arg]
-    params: Dict[str, Any]
-    kind: str
-
-
-@dataclass(frozen=True)
-class NumE:
-    expr: pl.Expr
-    pre_cols: Tuple[Tuple[str, pl.Expr], ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True)
-class CatE:
-    expr: pl.Expr
+from feature_engineering_custom_operations import (
+    add_custom_operation as _add_custom_operation,
+    add_elementary_op as _add_elementary_op,
+    add_groupby_op as _add_groupby_op,
+    add_target_op as _add_target_op,
+    add_ts_op as _add_ts_op,
+    create_operator as _create_operator,
+)
+from feature_engineering_default_operations import register_default_ops
+from feature_engineering_types import CatE, NumE, OpType, OperationSpec, OperatorSpec, SearchMode
 
 
 class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
@@ -861,91 +825,16 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         return stack[0]
 
     def _register_default_ops(self) -> None:
-        def fmt(name: str, args: List[str], params: Dict[str, Any]) -> str:
-            if not params:
-                return f"{name}({', '.join(args)})"
-            p = ",".join([f"{k}={params[k]}" for k in sorted(params)])
-            return f"{name}[{p}]({', '.join(args)})"
-
-        def safe_div(a: pl.Expr, b: pl.Expr, eps: float = 1e-12) -> pl.Expr:
-            return pl.when(b.abs() > eps).then(a / b).otherwise(None)
-
-        def rolling_min_key(method: Callable) -> str:
-            params = set(inspect.signature(method).parameters.keys())
-            return "min_samples" if "min_samples" in params else "min_periods"
-
-        # ---- elementary ----
-        self.add_elementary_op("add", 2, builder=lambda eng, a, p: a[0] + a[1], formatter=lambda args, p: fmt("add", args, p))
-        self.add_elementary_op("sub", 2, builder=lambda eng, a, p: a[0] - a[1], formatter=lambda args, p: fmt("sub", args, p))
-        self.add_elementary_op("mul", 2, builder=lambda eng, a, p: a[0] * a[1], formatter=lambda args, p: fmt("mul", args, p))
-        self.add_elementary_op("div", 2, builder=lambda eng, a, p: safe_div(a[0], a[1]), formatter=lambda args, p: fmt("div", args, p))
-        self.add_elementary_op("neg", 1, builder=lambda eng, a, p: -a[0], formatter=lambda args, p: fmt("neg", args, p))
-        self.add_elementary_op("abs", 1, builder=lambda eng, a, p: a[0].abs(), formatter=lambda args, p: fmt("abs", args, p))
-        self.add_elementary_op("sqrt_abs", 1, builder=lambda eng, a, p: a[0].abs().sqrt(), formatter=lambda args, p: fmt("sqrt_abs", args, p))
-        self.add_elementary_op("log1p_abs", 1, builder=lambda eng, a, p: a[0].abs().log1p(), formatter=lambda args, p: fmt("log1p_abs", args, p))
-        self.add_elementary_op("clip", 1, builder=lambda eng, a, p: a[0].clip(p.get("lo", -3.0), p.get("hi", 3.0)), formatter=lambda args, p: fmt("clip", args, p))
-
-        self.add_elementary_op(
-            "identity", 1,
-            builder=lambda eng, a, p: a[0],
-            formatter=lambda args, p: fmt("identity", args, p),
-        )
-
-        # ---- groupby (defaults to date group) ----
-        self.add_groupby_op("cs_rank", 1,
-            builder=lambda eng, a, p: a[0].rank(method=p.get("method","average"), descending=p.get("descending",True))
-                                  .over(p.get("group_col", eng.index_cols[1])),
-            formatter=lambda args, p: fmt("cs_rank", args, p),
-        )
-
-        self.add_groupby_op("cs_zscore", 1,
-            builder=lambda eng, a, p: safe_div(
-                (a[0] - a[0].mean().over(p.get("group_col", eng.index_cols[1]))),
-                a[0].std().over(p.get("group_col", eng.index_cols[1]))
-            ),
-            formatter=lambda args, p: fmt("cs_zscore", args, p),
-        )
-        self.add_groupby_op("grp_mean", 1,
-            builder=lambda eng, a, p: a[0].mean().over(p.get("group_col", eng.index_cols[1])),
-            formatter=lambda args, p: fmt("grp_mean", args, p),
-        )
-
-        # ---- time-series (over ticker) ----
-        min_key = rolling_min_key(pl.Expr.rolling_mean)
-
-        def ts_over_ticker(expr: pl.Expr, eng: "GAFeatureEngineerDEAP") -> pl.Expr:
-            return expr.over(eng.index_cols[0])
-
-        self.add_ts_op("ts_lag", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].shift(int(p.get("n",1))), eng),
-                      formatter=lambda args, p: fmt("ts_lag", args, p))
-        self.add_ts_op("ts_diff", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].diff(int(p.get("n",1))), eng),
-                      formatter=lambda args, p: fmt("ts_diff", args, p))
-        self.add_ts_op("ts_pct_change", 1, builder=lambda eng, a, p: ts_over_ticker(a[0].pct_change(int(p.get("n",1))), eng),
-                      formatter=lambda args, p: fmt("ts_pct_change", args, p))
-        self.add_ts_op("ts_mean", 1, builder=lambda eng, a, p: ts_over_ticker(
-                          a[0].rolling_mean(window_size=int(p.get("window",5)), **{min_key:int(p.get("min_samples",1))}), eng),
-                      formatter=lambda args, p: fmt("ts_mean", args, p))
-        self.add_ts_op("ts_std", 1, builder=lambda eng, a, p: ts_over_ticker(
-                          a[0].rolling_std(window_size=int(p.get("window",5)), **{min_key:int(p.get("min_samples",2))}), eng),
-                      formatter=lambda args, p: fmt("ts_std", args, p))
-        self.add_ts_op("ts_ewm_mean", 1, builder=lambda eng, a, p: ts_over_ticker(
-                          a[0].ewm_mean(span=float(p.get("span",10.0)), adjust=bool(p.get("adjust",False)), ignore_nulls=bool(p.get("ignore_nulls",False))), eng),
-                      formatter=lambda args, p: fmt("ts_ewm_mean", args, p))
-
-        if self.enable_impostor_op:
-            self.add_elementary_op(
-                "impostor_noise", 0,
-                builder=lambda eng, a, p: eng._impostor_expr(seed=int(p.get("seed", eng.random_state))),
-                formatter=lambda args, p: fmt("impostor_noise", [], p),
-            )
+        register_default_ops(self)
 
 
     def _new_tmp_col(self, base: str) -> str:
       self._tmp_col_counter += 1
       return self._safe_ident(f"__tmp__{base}__{self._tmp_col_counter}")
 
+
     # -------------------------
-    # KEEP create_operator SYNTAX + 4 OP TYPES
+    # Custom operations (element-wise, groupby, time-series, target_encoding)
     # -------------------------
     def create_operator(
         self,
@@ -957,124 +846,47 @@ class GAFeatureEngineerDEAP(BaseEstimator, TransformerMixin, RegressorMixin):
         num_col_args: Optional[List[int]] = None,
         target_col_arg: Optional[int] = None,
     ) -> None:
-        cat_col_args = cat_col_args or []
-        num_col_args = num_col_args or []
+        _create_operator(
+            self,
+            operator_function=operator_function,
+            arity=arity,
+            name=name,
+            operator_type=operator_type,
+            cat_col_args=cat_col_args,
+            num_col_args=num_col_args,
+            target_col_arg=target_col_arg,
+        )
 
-        allowed: set[str] = {"element-wise", "groupby", "time-series", "target_encoding"}
-        if operator_type not in allowed:
-            raise ValueError(f"operator_type must be one of {sorted(allowed)}")
-        if not isinstance(arity, int) or arity < 0:
-            raise ValueError("arity must be a non-negative int")
+    def add_elementary_op(self, name: str, arity: int, builder, formatter) -> None:
+        _add_elementary_op(self, name=name, arity=arity, builder=builder, formatter=formatter)
 
-        all_pos = list(cat_col_args) + list(num_col_args)
-        if target_col_arg is not None:
-            all_pos.append(target_col_arg)
-
-        for p in all_pos:
-            if not isinstance(p, int):
-                raise TypeError("arg positions must be integers (0-based)")
-            if p < 0 or p >= arity:
-                raise ValueError(f"arg position {p} out of bounds for arity={arity}")
-        if len(set(all_pos)) != len(all_pos):
-            raise ValueError("cat/num/target arg positions must be disjoint")
-
-        # guards to preserve your conceptual op types
-        if operator_type == "element-wise":
-            if cat_col_args:
-                raise ValueError("element-wise ops cannot use categorical args")
-            if target_col_arg is not None:
-                raise ValueError("element-wise ops cannot use target_col_arg")
-
-        if operator_type == "groupby":
-            if target_col_arg is not None:
-                raise ValueError("groupby ops cannot use target_col_arg")
-            if len(cat_col_args) == 0:
-                raise ValueError("groupby ops must have at least one categorical arg (group key)")
-            if len(num_col_args) == 0:
-                raise ValueError("groupby ops must have at least one numeric arg (value)")
-
-        if operator_type == "time-series":
-            if cat_col_args:
-                raise ValueError("time-series ops cannot use categorical args (initially)")
-            if target_col_arg is not None:
-                raise ValueError("time-series ops cannot use target_col_arg")
-
-        if operator_type == "target_encoding":
-            if target_col_arg is None:
-                raise ValueError("target_encoding ops must set target_col_arg")
-            if len(cat_col_args) == 0:
-                raise ValueError("target_encoding ops must have at least one categorical arg")
-
-        spec = OperatorSpec(
+    def add_groupby_op(self, name: str, arity: int, builder, formatter, restrict_group_cols_to_categoricals: bool = False) -> None:
+        _add_groupby_op(
+            self,
             name=name,
             arity=arity,
-            operator_type=operator_type,
-            fn=operator_function,
-            cat_pos=tuple(cat_col_args),
-            num_pos=tuple(num_col_args),
-            target_pos=target_col_arg,
+            builder=builder,
+            formatter=formatter,
+            restrict_group_cols_to_categoricals=restrict_group_cols_to_categoricals,
         )
-        self._custom_ops[name] = spec
 
-        kind_map = {
-            "element-wise": "elementary",
-            "groupby": "groupby",
-            "time-series": "ts",
-            "target_encoding": "target",
-        }
-        kind = kind_map[operator_type]
+    def add_ts_op(self, name: str, arity: int, builder, formatter) -> None:
+        _add_ts_op(self, name=name, arity=arity, builder=builder, formatter=formatter)
 
-        def _builder(eng: "GAFeatureEngineerDEAP", arg_exprs: List[pl.Expr], p: Dict[str, Any]) -> pl.Expr:
-            kwargs = {k: v for k, v in p.items() if k != "bound_cols"}
-            return operator_function(*arg_exprs, **kwargs)
+    def add_target_op(self, name: str, arity: int, builder, formatter) -> None:
+        _add_target_op(self, name=name, arity=arity, builder=builder, formatter=formatter)
 
-        def _formatter(args: List[str], p: Dict[str, Any]) -> str:
-            pp = {k: v for k, v in p.items() if k != "bound_cols"}
-            if not pp:
-                return f"{name}({', '.join(args)})"
-            param_str = ",".join([f"{k}={pp[k]}" for k in sorted(pp)])
-            return f"{name}[{param_str}]({', '.join(args)})"
-
-        self.add_custom_operation(
+    def add_custom_operation(self, name: str, arity: int, kind: str, builder, formatter=None, restrict_group_cols_to_categoricals: bool = False) -> None:
+        _add_custom_operation(
+            self,
             name=name,
             arity=arity,
             kind=kind,
-            builder=_builder,
-            formatter=_formatter,
-            restrict_group_cols_to_categoricals=(operator_type == "groupby"),
+            builder=builder,
+            formatter=formatter,
+            restrict_group_cols_to_categoricals=restrict_group_cols_to_categoricals,
         )
 
-        # new primitives => rebuild pset/toolbox next time
-        self._pset = None
-        self._toolbox = None
-
-    # registry helpers
-    def add_elementary_op(self, name: str, arity: int, builder, formatter) -> None:
-        self._ops_elementary[name] = OperationSpec(name=name, arity=arity, kind="elementary", builder=builder, formatter=formatter)
-
-    def add_groupby_op(self, name: str, arity: int, builder, formatter, restrict_group_cols_to_categoricals: bool = False) -> None:
-        self._ops_groupby[name] = OperationSpec(name=name, arity=arity, kind="groupby", builder=builder, formatter=formatter,
-                                                restrict_group_cols_to_categoricals=restrict_group_cols_to_categoricals)
-
-    def add_ts_op(self, name: str, arity: int, builder, formatter) -> None:
-        self._ops_ts[name] = OperationSpec(name=name, arity=arity, kind="ts", builder=builder, formatter=formatter)
-
-    def add_target_op(self, name: str, arity: int, builder, formatter) -> None:
-        self._ops_target[name] = OperationSpec(name=name, arity=arity, kind="target", builder=builder, formatter=formatter)
-
-    def add_custom_operation(self, name: str, arity: int, kind: str, builder, formatter=None, restrict_group_cols_to_categoricals: bool = False) -> None:
-        if formatter is None:
-            formatter = lambda args, p: f"{name}({', '.join(args)})"
-        if kind == "elementary":
-            self.add_elementary_op(name, arity, builder, formatter)
-        elif kind == "groupby":
-            self.add_groupby_op(name, arity, builder, formatter, restrict_group_cols_to_categoricals)
-        elif kind == "ts":
-            self.add_ts_op(name, arity, builder, formatter)
-        elif kind == "target":
-            self.add_target_op(name, arity, builder, formatter)
-        else:
-            raise ValueError("kind must be one of: elementary, groupby, ts, target")
 
     # -------------------------
     # Target encoding: turned into GP primitives automatically
