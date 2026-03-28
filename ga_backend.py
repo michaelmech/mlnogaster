@@ -219,9 +219,8 @@ class BackendMixin:
 
     def _apply_target_encoders(self, df: pl.DataFrame) -> pl.DataFrame:
         assert self._te_target_col is not None
-        assert self._te_global_mean is not None
         out = df
         for cat, mdf in self._te_maps.items():
             tec = self._te_colname(cat, self._te_target_col)
-            out = out.join(mdf, on=cat, how="left").with_columns(pl.col(tec).fill_null(self._te_global_mean))
+            out = out.join(mdf, on=cat, how="left")
         return out
