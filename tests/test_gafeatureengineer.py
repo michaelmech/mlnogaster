@@ -114,3 +114,35 @@ def test_hill_climb_checkpoint_write_and_resume(tmp_path):
     out = eng2.transform(df)
     assert out.height == df.height
     assert len(eng2.selected_programs_) >= 1
+
+
+def test_target_encoding_unseen_categories_are_null_on_transform():
+    df_train = _tiny_df()
+    y_train = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
+
+    eng = GAFeatureEngineerDEAP(
+        categorical_cols=["sector"],
+        search_mode="ga",
+        population_size=6,
+        generations=1,
+        hall_of_fame=1,
+        random_state=13,
+    )
+    eng.fit(df_train, y_train)
+
+    df_new = pl.DataFrame(
+        {
+            "ticker": ["A", "D"],
+            "date": [3, 3],
+            "f1": [1.1, 2.2],
+            "f2": [2.2, 1.1],
+            "sector": ["x", "new_sector"],
+        }
+    )
+    out = eng.transform(df_new)
+
+    te_col = eng._te_colname("sector", eng._te_target_col)
+    te_vals = out.select(te_col).to_series().to_list()
+
+    assert te_vals[0] is not None
+    assert te_vals[1] is None
