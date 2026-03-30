@@ -12,11 +12,11 @@ def create_operator(
     name: str,
     operator_type: OpType,
     cat_col_args: Optional[List[int]] = None,
-    num_col_args: Optional[List[int]] = None,
     target_col_arg: Optional[int] = None,
+    online: bool = False,
 ) -> None:
     cat_col_args = cat_col_args or []
-    num_col_args = num_col_args or []
+    online = bool(online)
 
     allowed: set[str] = {"element-wise", "groupby", "time-series", "target_encoding"}
     if operator_type not in allowed:
@@ -24,7 +24,7 @@ def create_operator(
     if not isinstance(arity, int) or arity < 0:
         raise ValueError("arity must be a non-negative int")
 
-    all_pos = list(cat_col_args) + list(num_col_args)
+    all_pos = list(cat_col_args)
     if target_col_arg is not None:
         all_pos.append(target_col_arg)
 
@@ -34,7 +34,9 @@ def create_operator(
         if p < 0 or p >= arity:
             raise ValueError(f"arg position {p} out of bounds for arity={arity}")
     if len(set(all_pos)) != len(all_pos):
-        raise ValueError("cat/num/target arg positions must be disjoint")
+        raise ValueError("cat/target arg positions must be disjoint")
+
+    num_col_args = [i for i in range(arity) if i not in set(all_pos)]
 
     if operator_type == "element-wise":
         if cat_col_args:
@@ -61,6 +63,8 @@ def create_operator(
             raise ValueError("target_encoding ops must set target_col_arg")
         if len(cat_col_args) == 0:
             raise ValueError("target_encoding ops must have at least one categorical arg")
+    elif online:
+        raise ValueError("online can only be used with target_encoding operators")
 
     spec = OperatorSpec(
         name=name,
@@ -70,6 +74,7 @@ def create_operator(
         cat_pos=tuple(cat_col_args),
         num_pos=tuple(num_col_args),
         target_pos=target_col_arg,
+        online=online,
     )
     engine._custom_ops[name] = spec
 

@@ -182,9 +182,9 @@ class BackendMixin:
             df = pl.from_pandas(df_pd)
         elif isinstance(X, np.ndarray):
             if not self.numeric_cols:
-                raise ValueError("If passing a numpy array, you must provide numeric_cols in __init__.")
+                self.numeric_cols = [f"num_{i}" for i in range(X.shape[1])]
             if X.shape[1] != len(self.numeric_cols):
-                raise ValueError("numpy array column count != len(numeric_cols).")
+                raise ValueError("numpy array column count != inferred numeric column count.")
             df = pl.DataFrame({c: X[:, i] for i, c in enumerate(self.numeric_cols)})
         else:
             raise TypeError(f"Unsupported input type: {type(X)}")

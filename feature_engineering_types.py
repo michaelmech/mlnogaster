@@ -17,6 +17,7 @@ class OperatorSpec:
     cat_pos: tuple[int, ...]
     num_pos: tuple[int, ...]
     target_pos: Optional[int] = None
+    online: bool = False
 
 
 @dataclass(frozen=True)
