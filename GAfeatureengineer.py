@@ -39,8 +39,8 @@ class GAFeatureEngineerDEAP(
     def __init__(
         self,
         index_cols: Tuple[str, str] = ("ticker", "date"),
+        cat_cols: Optional[Sequence[str]] = None,
         categorical_cols: Optional[Sequence[str]] = None,
-        numeric_cols: Optional[Sequence[str]] = None,
         max_colname_len: int = 160,
         random_state: int = 0,
         target_encoding_smoothing: float = 10.0,
@@ -72,8 +72,11 @@ class GAFeatureEngineerDEAP(
         self.checkpoint_path = checkpoint_path
         self.checkpoint_every_accepts = checkpoint_every_accepts
         self.index_cols = index_cols
-        self.categorical_cols = list(categorical_cols) if categorical_cols else []
-        self.numeric_cols = list(numeric_cols) if numeric_cols else []
+        if cat_cols is not None and categorical_cols is not None:
+            raise ValueError("Pass only one of cat_cols or categorical_cols.")
+        resolved_cat_cols = cat_cols if cat_cols is not None else categorical_cols
+        self.categorical_cols = list(resolved_cat_cols) if resolved_cat_cols else []
+        self.numeric_cols: List[str] = []
         self.max_colname_len = int(max_colname_len)
         self.random_state = int(random_state)
         self.target_encoding_smoothing = float(target_encoding_smoothing)

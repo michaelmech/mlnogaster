@@ -31,8 +31,8 @@ class OperationsMixin:
         name: str,
         operator_type: OpType,
         cat_col_args: Optional[List[int]] = None,
-        num_col_args: Optional[List[int]] = None,
         target_col_arg: Optional[int] = None,
+        online: bool = False,
     ) -> None:
         _create_operator(
             self,
@@ -41,8 +41,8 @@ class OperationsMixin:
             name=name,
             operator_type=operator_type,
             cat_col_args=cat_col_args,
-            num_col_args=num_col_args,
             target_col_arg=target_col_arg,
+            online=online,
         )
 
     def add_elementary_op(self, name: str, arity: int, builder, formatter) -> None:

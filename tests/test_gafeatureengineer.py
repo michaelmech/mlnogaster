@@ -63,7 +63,6 @@ def test_custom_operator_can_be_compiled_and_evaluated():
         arity=1,
         name="square",
         operator_type="element-wise",
-        num_col_args=[0],
     )
     eng.fit(df, y)
 
@@ -121,7 +120,7 @@ def test_target_encoding_unseen_categories_are_null_on_transform():
     y_train = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
 
     eng = GAFeatureEngineerDEAP(
-        categorical_cols=["sector"],
+        cat_cols=["sector"],
         search_mode="ga",
         population_size=6,
         generations=1,
@@ -146,3 +145,30 @@ def test_target_encoding_unseen_categories_are_null_on_transform():
 
     assert te_vals[0] is not None
     assert te_vals[1] is None
+
+
+def test_create_operator_inferrs_numeric_args_and_online_flag():
+    eng = GAFeatureEngineerDEAP(search_mode="ga", population_size=4, generations=1, hall_of_fame=1)
+
+    eng.create_operator(
+        operator_function=lambda c, x, y: x + y,
+        arity=3,
+        name="grp_custom",
+        operator_type="groupby",
+        cat_col_args=[0],
+    )
+    spec = eng._custom_ops["grp_custom"]
+    assert spec.cat_pos == (0,)
+    assert spec.num_pos == (1, 2)
+
+    eng.create_operator(
+        operator_function=lambda c, y: y,
+        arity=2,
+        name="te_custom",
+        operator_type="target_encoding",
+        cat_col_args=[0],
+        target_col_arg=1,
+        online=True,
+    )
+    te_spec = eng._custom_ops["te_custom"]
+    assert te_spec.online is True
