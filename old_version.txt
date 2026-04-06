@@ -1,0 +1,819 @@
+import numpy as np
+from collections.abc import Iterable
+import pandas as pd
+import copy
+import numbers
+import datetime
+import scipy
+import functools
+
+from functools import wraps
+
+from sklearn.model_selection import ShuffleSplit
+from sklearn.metrics import make_scorer,mean_squared_error
+from sklearn.base import RegressorMixin,ClassifierMixin,TransformerMixin,check_array
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+from gplearn.genetic import SymbolicTransformer
+from gplearn.functions import make_function
+from gplearn.fitness import make_fitness
+
+import pygad
+
+from sklego.base import Clusterer
+
+import numpy as np
+import inspect
+import rapidfuzz
+from sklearn.metrics import pairwise_distances
+import numba
+
+
+def pad_array(arr, length):
+    """
+    Pads a 1-dimensional array with zeros to a specified length using np.pad.
+
+    Parameters:
+        arr (numpy.ndarray): The 1-dimensional array to pad.
+        length (int): The desired length of the padded array.
+
+    Returns:
+        numpy.ndarray: The padded array.
+    """
+    pad_width = (0, max(0, length - len(arr)))
+    return np.pad(arr, pad_width, 'constant')
+
+def JWdistance(x,y):
+  return rapidfuzz.distance.JaroWinkler.distance(x.flatten(),y.flatten())
+
+def alt_cdf(y):
+    uniques, counts = np.unique(y, return_counts=True)
+    value_counts = np.cumsum(counts) / np.sum(counts)
+    return value_counts[np.searchsorted(uniques, y)]
+
+class GeneticFeatureEngineer(TransformerMixin):
+  def flatten_list(matrix):
+    flat_list = []
+    for row in matrix:
+      flat_list.extend(row)
+    return flat_list
+
+  def remove_from_list(my_list, index):
+    if 0 <= index < len(my_list):
+        # Check if the index is within the valid range
+        removed_element = my_list.pop(index)
+        return removed_element, my_list
+    else:
+        return None, my_list
+
+  def __init__(self,n_population: int=100,n_generations: int=30,n_participants: int=100,parsimony: float=0.001,random_state= None,n_seasons: int=0,impostor_gene: bool=False,
+               metric='pearson',init_p_mutation: float=0.03,n_inductees: int=100, max_n_feats: int=30,superficiality: float=0.001,phenology: float=0.001,impostor_penalty:float=0.001,
+               operations: Iterable=None, feat_names: Iterable=None,percentile: int=0,fitness_sharing: bool=False,mortality:float=0.001,batch:bool=False,lightweight: bool= False,
+              adaptive: bool=False,n_eras: int=5,n_jobs: int=1,generosity: float=0.001,aging: bool=False,extinction: bool=False,n_stagnation: int=1,purge_feats: bool=False,
+              prune_genes=False):
+
+    assert np.percentile(np.array([1,2]),percentile)
+
+    self.fitness_sharing=fitness_sharing
+
+    self.prune_genes=prune_genes
+
+    self.feat_idxs= [] if purge_feats else None
+
+    self.impostor_gene=impostor_gene
+
+    self.extinction=extinction
+
+    self.extinction_counter=0
+
+    self.n_stagnation=n_stagnation
+
+    self.aging=aging
+
+    self.mortality=mortality
+
+    self.generosity=generosity
+
+    self.impostor_penalty=impostor_penalty
+
+    self.superficiality=superficiality
+
+    self.percentile=percentile
+
+    self.parsimony=parsimony
+
+    self.phenology=phenology
+    self.lightweight=lightweight
+
+    self.batch= True if self.lightweight else batch
+
+    self.n_jobs=n_jobs
+
+    self.random_state= np.random.randint(10000) if not random_state else random_state
+
+    self.adaptive=adaptive
+
+    self.pickled=False
+
+    self.n_population=n_population
+
+    self.n_inductees= n_inductees
+
+    assert self.n_inductees<=self.n_population, 'HOF must be less than or equal to population'
+
+    self.n_generations=n_generations
+
+    self.n_participants=n_participants
+
+    assert self.n_participants<=self.n_population, 'tournament size must be less than or equal to population'
+
+    self.n_eras=n_eras
+
+    self.max_n_feats=max_n_feats
+
+    assert self.max_n_feats <= self.n_eras*self.n_generations*self.n_population, 'max # of features must be less than or equal to eras*generations* population = {calc}'.format(calc=self.n_eras*self.n_generations*self.n_population)
+
+    self.init_p_mutations(init_p_mutation)
+
+    assert (self.p_crossover+self.p_mutation)==1, 'rates must sum to 1'
+
+    self.operations=operations if operations else ['add','sub','mul','sqrt','abs','neg','inv']
+
+    self.operations_copy=self.operations.copy()
+
+    self.feat_names=list(feat_names)
+    self.orig_feat_names=self.feat_names.copy()
+
+    self.fitted=False
+
+    self.n_seasons=n_seasons
+
+    assert self.n_seasons<=self.n_population,'seasons cannot exceed population size'
+
+    self.metric= self.custom_metric(metric,metric.__code__.co_name) if callable(metric) else metric
+
+    self.random_counter=0
+
+    self.init_model()
+
+    self.minimize=False
+
+    self.sign=1 if not self.minimize else -1
+
+    self.codex=pd.DataFrame()
+
+    self.mapper=None
+
+    self.reverse_mapper=None
+
+    self.leaderboard=pd.DataFrame()
+
+    self.history=[]
+
+    self.pareto_metrics=[]
+
+    self.engineers=[] ####
+
+  def init_model(self):
+        # Implement warm start by preserving best programs from previous iterations
+        warm_start_programs = getattr(self, 'best_programs', [])
+
+        safe_population_size = max(10, self.n_population)  # Ensure at least 10
+        safe_n_inductees = min(safe_population_size - 1, max(1, self.n_inductees))
+        safe_tournament_size = min(safe_population_size - 1, max(2, self.n_participants))
+
+        self.engineer = SymbolicTransformer(
+            population_size=self.n_population,
+            hall_of_fame=self.n_inductees,
+            generations=self.n_generations,
+            parsimony_coefficient=self.parsimony,
+            tournament_size=self.n_participants,
+            const_range=None,
+            function_set=self.operations,
+            p_crossover=self.p_crossover,
+            p_hoist_mutation=self.p_hoist,
+            p_point_mutation=self.p_point,
+            p_subtree_mutation=self.p_sub,
+            n_jobs=self.n_jobs,
+            feature_names=self.feat_names.copy(),
+            metric=self.metric,
+            warm_start=bool(warm_start_programs),  # Enable warm start if programs exist
+            random_state=self.random_state + self.random_counter,
+            n_components=self.n_inductees
+        )
+
+        # If warm start programs exist, initialize the model with them
+        if warm_start_programs:
+            self.engineer._programs = warm_start_programs
+
+        self.random_counter += 1
+        return self.engineer
+
+  def calc_shared_fitness(self, fitness):
+    if not hasattr(self, 'codex_programs'):
+        return fitness
+    fitnesses = np.array([gp.fitness_ for gp in self.codex_programs])
+    if not fitnesses.size:
+        return fitness
+    distances = np.sqrt(np.sum((fitnesses.reshape(-1, 1) - fitness) ** 2, axis=0))
+    neighbors = distances.argsort()[:min(10, len(fitnesses))]
+    p_fitness = np.mean(fitnesses[neighbors])
+    return self.sign * (self.generosity * p_fitness) + fitness
+
+  def map_fitness_sharing(self,func):
+    @wraps(func)
+    def new_func(y_true,y_pred,w):
+
+      raw_fitness=func(self,y_true,y_pred)
+
+      return self.calc_shared_fitness(raw_fitness)
+
+    return new_func
+
+  def map_birthdates(self,programs):
+    for program in programs:
+      program.birthdate=self.era*self.engineer.generations
+
+  def age_penalty(self,age):
+    if age==0:
+      return 0
+
+    birthdates=[program.birthdate for program in self.codex_programs]
+    range_=np.max(birthdates)-np.min(birthdates)
+    st_dev=np.std(birthdates)
+    b=range_
+    a=2*st_dev**2
+    return a*2.714**-(((age-b)**2)/(a))
+
+  def codex_generator(self,X):
+
+      new=np.concatenate([engineer.transform(X) for engineer in self.engineers],axis=1)
+
+      if not self.lightweight:
+        column_names=GeneticFeatureEngineer.flatten_list([[str(name) for name in engineer._best_programs] for engineer in self.engineers])
+        codex=pd.concat([pd.DataFrame(X),pd.DataFrame(new,columns=column_names)],axis=1) if not self.batch else new.copy()
+        unique_cols,unique_idxs=np.unique(codex,return_index=True,axis=1)
+        codex=pd.DataFrame(unique_cols,columns=codex.columns[unique_idxs])
+      else:
+        codex=np.concatenate((X.values,new),axis=1) if not self.batch else new.copy()
+        codex=np.unique(codex,return_index=False,axis=1)
+
+      return codex
+
+  def fit_update(self, X, y, era=None, verbose=True):
+    if verbose:
+        t1 = datetime.datetime.now()
+        print(f"Before engineer.fit - X shape: {X.shape}, y shape: {y.shape}")
+    self.engineer.fit(X, y)
+    if verbose:
+        t2 = datetime.datetime.now()
+    self.engineers.append(self.engineer)
+
+    new = self.engineer.transform(X)
+    unique_cols,unique_idxs=np.unique(new,return_index=True,axis=1)
+    programs = np.array(self.engineer._best_programs)
+    programs = programs[unique_idxs]
+
+    if self.prune_genes:
+      lst=[]
+      for program in programs:
+        programs=lst.append(self.prune(program,X,y))
+      programs=np.array(lst)
+
+    if not self.lightweight:
+
+      column_names = [str(name) for name in programs]
+      new = pd.DataFrame(unique_cols, columns=column_names)
+
+      self.codex = pd.concat([self.codex, new], axis=1) if not self.batch else new.copy()
+      unique_cols,unique_idxs=np.unique(self.codex,return_index=True,axis=1)
+      self.codex=pd.DataFrame(unique_cols,columns=self.codex.columns[unique_idxs])
+
+    if self.n_seasons > 1:
+        season_sign = 1 if (self.era % 2 == 0) else -1
+
+        scaler=StandardScaler()
+        clusterer = KMeans(n_clusters=self.n_seasons)
+
+        scaled_features =np.apply_along_axis(alt_cdf,0,np.array([program.execute(X) for program in programs]).T)
+        scaled_features = scaler.fit_transform(scaled_features)
+
+        nans_idx = np.isnan(scaled_features).any(axis=0)
+        infs_idx = np.isinf(scaled_features).any(axis=0)
+
+        programs = programs[~nans_idx & ~infs_idx]
+        scaled_features = scaled_features[:, ~nans_idx & ~infs_idx]
+
+        cluster_idxs = clusterer.fit_predict(scaled_features.T)
+
+        for idx, program in enumerate(programs):
+            program.fitness_ = program.fitness() - self.sign * self.phenology * cluster_idxs[idx] * season_sign
+
+    if self.aging:
+        self.map_birthdates(programs)
+
+        for program in programs:
+            program.fitness_ = program.fitness() - self.sign * self.mortality * self.age_penalty(self.era - program.birthdate)
+
+        for program in self.codex_programs:
+            program.fitness_ = program.fitness() - self.sign * self.mortality * self.age_penalty(self.era - program.birthdate)
+
+    programs=list(programs)
+
+    if self.n_seasons > 1 or self.aging:
+        for program in programs + self.codex_programs:
+            program.fitness_ = program.fitness()
+
+    if len(self.pareto_metrics)>0:
+      sign=-1 if self.minimize else 1
+
+      programs_array=np.array([program.execute(X) for program in programs]).T
+
+      for idx,program in enumerate(programs):
+        penalty = self.parsimony * program.length_ *sign
+        pareto_tuple=(program.raw_fitness_,)
+        for pareto_metric in self.pareto_metrics:
+          pareto_tuple+=tuple([pareto_metric(self,y,programs_array[:,idx])-penalty])
+        program.pareto_fitnesses=pareto_tuple
+
+      programs=self.pareto_front_fitness(programs)
+
+      for program in programs:
+        penalty = self.parsimony * program.length_ *sign
+        program.fitness_=program.fitness_-penalty
+
+    programs=self.gene_assignments(programs)
+
+    if self.extinction and self.era!=0:
+
+      stagnation_condition=self.engineer.run_details_['gene_scores'].max()<self.history[-1]['gene_scores'].max()
+
+      self.extinction_counter+= -1 if not stagnation_condition else int(stagnation_condition)
+      X=self.gene_extinction(X)
+
+    # Sort the programs list by fitness
+    programs.sort(key=lambda x: x.fitness_, reverse=self.minimize)
+    filtered_fitnesses = [program.fitness_ for program in programs if
+                          program.fitness_ <= np.percentile([p.fitness_ for p in programs], self.percentile)] if self.minimize else [
+        program.fitness_ for program in programs if
+        program.fitness_ >= np.percentile([p.fitness_ for p in programs], self.percentile)]
+
+    # Use numpy slicing to get the filtered programs
+    self.codex_programs += programs[:len(filtered_fitnesses)]
+
+    #codex_strs = [str(program) for program in self.codex_programs]
+    #program_strs = [str(program) for program in programs]
+
+    return self.codex_programs,X
+
+  def init_p_mutations(self,p_mutation: float=0.03):
+
+    if p_mutation:
+      assert p_mutation<=1
+      self.p_mutation=p_mutation
+
+    self.p_hoist=self.p_mutation/3
+    self.p_sub=self.p_mutation/3
+    self.p_point=self.p_mutation/3
+    self.p_crossover=1-self.p_mutation
+
+  def prune(self,program, X, y):
+    counter = 0
+    removed_parts = []  # List to store removed parts
+
+    while len(program.program) > 1:
+
+        orig_fitness = program.metric(program.execute(X), y.flatten(), [1] * len(X))
+
+        # Remove the first part
+        removed_part = program.program[0]
+
+        removed_parts.append(removed_part)
+        _,program.program = GeneticFeatureEngineer.remove_from_list(program.program, 0)
+
+        new_fitness = program.metric(program.execute(X), y.flatten(), np.array([1] * len(X)))
+
+        if new_fitness < orig_fitness:
+            break
+        counter += 1
+
+    # Restore removed parts if counter > 0
+    if counter > 0:
+        return program
+
+    for removed_part in removed_parts:
+        program.program.insert(0, removed_part)
+
+    return program
+
+  def encode_gene(self,program):
+
+    str_program=[x.name if not isinstance(x,int) else x for x in program]
+    return np.array([self.mapper[decoding] if isinstance(decoding,str) else decoding for decoding in str_program])
+
+  def pareto_front_fitness(self,objs):
+    n_objectives = len(objs[0].pareto_fitnesses)
+    n_individuals = len(objs)
+
+    scores = np.zeros((n_objectives, n_individuals))
+    for i in range(n_individuals):
+        for j in range(n_objectives):
+            scores[j][i] = getattr(objs[i], "pareto_fitnesses")[j]
+
+    crowding_distances = np.zeros(n_individuals)
+
+    for objective in range(n_objectives):
+        sorted_indices = np.argsort(scores[objective])
+        crowding_distances[sorted_indices[0]] = np.inf
+        crowding_distances[sorted_indices[-1]] = np.inf
+
+        for i in range(1, n_individuals - 1):
+            fitness_range = scores[objective, sorted_indices[i+1]] - scores[objective, sorted_indices[i-1]]
+            crowding_distances[sorted_indices[i]] += fitness_range
+
+    new_scores = 1 / (crowding_distances + 1)
+
+    for i in range(n_individuals):
+        setattr(objs[i], "fitness_", new_scores[i])
+
+    return objs
+
+  def encode_genes(self,programs):
+
+    unpadded_genes=list({str(self.encode_gene(x.program))+str(y): self.encode_gene(x.program) for y,x in enumerate(programs)}.values())
+    max_length = max([len(row) for row in unpadded_genes])
+    encoded_genes = np.array([np.pad(row, (0, max_length-len(row)),constant_values=-999) for row in unpadded_genes])
+
+    return encoded_genes
+
+  def gene_assignments(self, programs):
+    if len(programs) == 0:
+        print("Warning: Empty programs list in gene_assignments")
+        return []
+
+    encoded_genes = self.encode_genes(programs)
+    operation_encodings = [self.mapper[x] if isinstance(x,str) else x for x in self.mapper]
+    encoded_genes[~np.isin(encoded_genes, operation_encodings)] = -999
+    fitnesses = np.array([gx.fitness_ for gx in programs])
+
+    # Initialize impostor_disabled flag if it doesn't exist
+    if not hasattr(self, 'impostor_disabled_for_era'):
+        self.impostor_disabled_for_era = False
+
+    if self.impostor_gene and not self.impostor_disabled_for_era:
+        # Find which programs contain impostor genes
+        impostor_idx = (encoded_genes == -1).any(axis=1)
+
+        # Calculate percentage of programs with impostor genes
+        impostor_percentage = np.mean(impostor_idx) * 100
+
+        # Check if impostor genes are too dominant (e.g., >75% of population)
+        if impostor_percentage > 75:
+            print(f"WARNING: Impostor genes present in {impostor_percentage:.1f}% of programs - disabling for this era")
+            self.impostor_disabled_for_era = True
+
+            # Remove impostor operation from programs for current processing
+            for program in programs:
+                # Filter out impostor operations from program
+                if hasattr(program, 'program') and isinstance(program.program, list):
+                    program.program = [op for op in program.program if not (hasattr(op, 'name') and op.name == 'impostor_operation')]
+
+            # Recalculate fitness without impostor genes
+            # This is optional and potentially costly, but ensures accurate fitness
+            for program in programs:
+                if hasattr(program, 'fitness'):
+                    try:
+                        program.raw_fitness_ = program.fitness(program.execute(self.X_current), self.y_current)
+                        program.fitness_ = program.raw_fitness_
+                    except:
+                        # If fitness can't be recalculated, keep existing value
+                        pass
+
+            # Recalculate encoded genes after impostor removal
+            encoded_genes = self.encode_genes(programs)
+            operation_encodings = [self.mapper[x] if isinstance(x,str) else x for x in self.mapper]
+            encoded_genes[~np.isin(encoded_genes, operation_encodings)] = -999
+            fitnesses = np.array([gx.fitness_ for gx in programs])
+        else:
+            # Normal impostor gene handling if not too dominant
+            # Ensure we don't filter out all programs
+            if np.any(impostor_idx):
+                ref_fitness = fitnesses[impostor_idx].mean()
+                mask = (fitnesses > ref_fitness) | (~impostor_idx)
+
+                # Safety check: if mask would exclude all programs, keep at least some
+                if not np.any(mask):
+                    print("Warning: Impostor filtering would remove all programs. Keeping top performers.")
+                    # Keep top 25% by fitness
+                    n_keep = max(1, len(programs) // 4)
+                    top_indices = np.argsort(fitnesses)[-n_keep:]
+                    programs = np.array(programs)[top_indices]
+                    fitnesses = fitnesses[top_indices]
+                    encoded_genes = encoded_genes[top_indices]
+                else:
+                    # Apply the mask
+                    programs = np.array(programs)[mask]
+                    fitnesses = fitnesses[mask]
+                    encoded_genes = encoded_genes[mask]
+    elif self.impostor_disabled_for_era:
+        print("Impostor genes disabled for this era")
+
+    # Continue with the rest of the method as before
+    repeated = np.repeat(fitnesses, repeats=encoded_genes.shape[-1], axis=0).reshape(encoded_genes.shape)
+
+    # Add safety check for empty arrays
+    if repeated.size == 0 or encoded_genes.size == 0:
+        print("Warning: Empty repeated or encoded_genes array")
+        return list(programs)  # Return unchanged
+
+    gene_scores = pd.DataFrame({'fitness': repeated.ravel(), 'gene': encoded_genes.ravel()}).groupby('gene').mean()['fitness']
+    gene_counts = pd.Series(encoded_genes.reshape(-1)).value_counts()
+
+    # Convert indices safely
+    try:
+        gene_scores.index = [self.reverse_mapper[x] if x in self.reverse_mapper else x for x in gene_scores.index]
+        gene_counts.index = [self.reverse_mapper[x] if x in self.reverse_mapper else x for x in gene_counts.index]
+    except Exception as e:
+        print(f"Error converting indices: {e}")
+
+    self.engineer.run_details_['gene_scores'] = gene_scores
+    self.engineer.run_details_['gene_counts'] = gene_counts
+
+    return list(programs)
+
+  def gene_extinction(self,X):  #######
+
+    purge_lst=[]
+    if self.extinction_counter == self.n_stagnation:
+
+        gene_counts = self.engineer.run_details_['gene_counts']
+
+        purge_idx = gene_counts.drop(-999).idxmax()
+        purge_lst.append(purge_idx)
+
+        if isinstance(purge_idx,str):
+
+          print(f'purging operation {purge_idx}')
+          self.operations = [item for item in self.operations if
+            (isinstance(item, str) and item != purge_idx) or
+            (not isinstance(item, str) and item.name != purge_idx)]
+
+        if self.feat_idxs is not None:
+            idxs=[x for x in gene_counts.index if x not in gfe.str_operations or x==-999]
+            purge_idx=gene_counts[idxs].drop(-999).idxmax()
+            print(f'purging feature "{purge_idx}"')
+
+
+
+
+            self.feat_idxs.pop(purge_idx)
+
+            X=np.take(X, list(self.feat_idxs.values()), axis=1)
+
+            self.feat_idxs=OrderedDict({x:y for y,x in enumerate(self.feat_idxs)})
+
+
+
+            self.feat_names.remove(purge_idx)
+
+
+            self.reverse_feat_idxs={y:x for x,y in self.feat_idxs.items()}
+
+            for key in self.reverse_feat_idxs:
+              self.mapper[key]=self.reverse_feat_idxs[key]
+              self.reverse_mapper[self.reverse_feat_idxs[key]]=key
+
+        self.extinction_counter = 0
+    self.engineer.run_details_['purged_genes']=purge_lst
+
+    return X
+
+  def calc_diversity(self, X):
+    self.encoded_genes = self.encode_genes(self.codex_programs)
+    self.g_neigh = NearestNeighbors(n_neighbors=min(5, len(self.encoded_genes)), n_jobs=-1, metric=lambda x, y: JWdistance(x, y))
+    self.p_neigh = NearestNeighbors(n_neighbors=min(5, len(self.encoded_genes)), n_jobs=-1, metric=lambda x, y: scipy.spatial.distance.euclidean(x, y))
+    self.g_neigh.fit(self.encoded_genes)
+    g_diversity = np.mean(self.g_neigh.kneighbors(self.encoded_genes)[0])
+
+    # Get fitnesses and handle inf values
+    fitnesses = np.array([gp.fitness_ for gp in self.codex_programs])
+
+    # Check for and handle infinite values
+    if np.any(np.isinf(fitnesses)):
+        print(f"Warning: {np.sum(np.isinf(fitnesses))} infinite fitness values detected and replaced")
+        # Replace inf with max finite value, -inf with min finite value
+        mask_finite = ~np.isinf(fitnesses)
+        if np.any(mask_finite):
+            max_finite = np.max(fitnesses[mask_finite])
+            min_finite = np.min(fitnesses[mask_finite])
+        else:
+            # If all values are inf/-inf, use defaultsQ
+            max_finite = 1.0
+            min_finite = -1.0
+
+        # Replace inf with the max finite value * 2 (to preserve their "extreme" nature)
+        fitnesses[np.isposinf(fitnesses)] = max_finite * 2
+        # Replace -inf with the min finite value * 2
+        fitnesses[np.isneginf(fitnesses)] = min_finite * 2
+
+    # Also check for NaN values which can cause similar issues
+    if np.any(np.isnan(fitnesses)):
+        print(f"Warning: {np.sum(np.isnan(fitnesses))} NaN fitness values detected and replaced")
+        # Replace NaN with mean or 0 if all are NaN
+        if np.any(~np.isnan(fitnesses)):
+            mean_value = np.mean(fitnesses[~np.isnan(fitnesses)])
+        else:
+            mean_value = 0.0
+        fitnesses[np.isnan(fitnesses)] = mean_value
+
+    # Reshape for NN
+    fitnesses = fitnesses.reshape(-1, 1)
+
+    # Fit the nearest neighbors model
+    self.p_neigh.fit(fitnesses)
+    p_diversity = np.mean(self.p_neigh.kneighbors(fitnesses)[0])
+    self.engineer.run_details_['phenotypic diversity'] = p_diversity
+    self.engineer.run_details_['genetic diversity'] = g_diversity
+    return self.superficiality*g_diversity + p_diversity
+
+  def fitness_importances(self,program_lst):
+    fitnesses = np.array([fx.fitness_ for fx in program_lst])
+    indexer = np.argsort(fitnesses)
+    imps = pd.DataFrame({'fitnesses': fitnesses[indexer]}, index=[str(program_lst[i]) for i in indexer])
+    imps['programs'] = [program_lst[i] for i in indexer]
+    imps = imps.drop_duplicates(keep='last')
+    imps = imps.sort_values('fitnesses', ascending=self.minimize)
+    self.engineer._best_programs = imps['programs'].tolist()
+    self.leaderboard = pd.concat([self.leaderboard,imps[['fitnesses']].copy()]).sort_values('fitnesses', ascending=self.minimize)
+    self.leaderboard.index = [str(program) for program in self.engineer._best_programs]
+    self.operations = self.operations_copy if self.extinction else self.operations
+
+  def define_mapper(self, X):
+    n_features = X.shape[-1]
+    self.mapper = {x:y for x,y in enumerate(self.feat_names)}
+    self.mapper[-999]=-999
+    self.str_operations = [x if isinstance(x,str) else x.name for x in self.operations]
+    for i, operation in enumerate(self.str_operations, start=n_features):
+        self.mapper[operation] = i
+    self.reverse_mapper = {y: x for x, y in self.mapper.items()}
+    self.reverse_mapper[-999]=-999
+
+  def fit_create_function(program):
+
+    def func(x1):
+      if not len(x1.shape)==1:
+        return program.execute(x1)
+
+      else:
+        return np.array(x1)
+
+    return make_function(function=func,arity=1,name=str(program)[:20]+str(program)[-20:])
+
+  def pickleable_version(self):
+
+    assert self.fitted, 'cannot save unfitted model'
+    to_pickle=copy.copy(self)
+    to_pickle.engineer=copy.copy(self.engineer)
+    engineerer=to_pickle.engineer
+    engineerer._programs='replace_programs'
+    engineerer.metric=self.metric_name
+    engineerer._metric = self.metric_name
+
+    for program in engineerer._best_programs:
+      program.metric=self.metric_name
+
+    to_pickle.metric=self.metric_name
+    to_pickle.pickled=True
+
+    return to_pickle
+
+  def archive(self):
+
+      self.engineer.run_details_['n_participants']=self.n_participants
+      self.engineer.run_details_['p_mutation']=self.p_mutation
+      self.engineer.run_details_['era']=self.era
+      self.history.append(self.engineer.run_details_)
+
+  def fit(self, X, y):
+    assert not self.pickled, 'saved model only for transformation'
+    X = check_array(X)
+    y = check_array(y)
+
+    # Store current X and y for potential fitness recalculation
+    self.X_current = X
+    self.y_current = y
+
+    if self.feat_idxs is not None:
+        self.feat_idxs={str(x):x for x in range(X.shape[-1])} if not self.feat_names else {x:y for y,x in enumerate(self.feat_names)}
+        self.feat_idxs=OrderedDict(self.feat_idxs)
+
+    self.era = 0
+    self.fitted = False
+    self.define_mapper(X)
+    self.codex_programs = []
+
+    # Initialize impostor operation if needed
+    if self.impostor_gene:
+        self.custom_operation(lambda x1,x2: np.random.rand(*x1.shape), 'impostor_operation', arity=2)
+        self.mapper['impostor_operation'] = -1
+        self.reverse_mapper[-1] = 'impostor_operation'
+        self.str_operations.append('impostor_operation')
+        # Reset impostor disabled flag for the first era
+        self.impostor_disabled_for_era = False
+
+    codex_programs, X = self.fit_update(X, y)
+    if self.adaptive:
+        max_participants = self.n_population
+        self.diversity_lst = [self.calc_diversity(X)]
+    self.archive()
+
+    for era in range(self.n_eras - 1):
+        if len(self.operations) > 0 and X.shape[-1] > 0:
+            self.init_model()
+            self.era += 1
+
+            # Reset impostor disabled flag for each new era
+            self.impostor_disabled_for_era = False
+
+            programs_lst, X = self.fit_update(X, y, era)
+            if self.adaptive:
+                self.diversity_lst.append(self.calc_diversity(X))
+                self.p_mutation = 1 - self.diversity_lst[-1] / np.max(self.diversity_lst)
+                self.n_participants = round(self.diversity_lst[-1] / np.max(self.diversity_lst) * max_participants)
+                self.init_p_mutations(None)
+            self.archive()
+        else:
+            print(f'Genes are extinct. Ending on era {self.era}')
+            break
+
+    self.fitness_importances(np.array(self.codex_programs))
+    self.fitted = True
+    return self
+
+  def custom_metric(self, func, name, minimize=False):
+    self.minimize = minimize
+    assert 'y' in func.__code__.co_varnames and 'y_pred' in func.__code__.co_varnames and func.__code__.co_varnames[0] == 'self' and func.__code__.co_argcount == 3, 'must contain 3 arguments self,y,y_pred in order'
+    try:
+        result = func(self, np.array([1, 1]), np.array([2, 2]))
+    except Exception as e:
+        print(e)
+        raise Exception('fails to pass test inputs np.array([1,1]),np.array([2,2])')
+    assert isinstance(result, numbers.Number)
+
+    @wraps(func)
+    def new_func(y_true, y_pred, w):
+        return func(self, y_true, y_pred)
+
+    if self.fitness_sharing:
+        new_func = self.map_fitness_sharing(func)
+
+    self.metric = make_fitness(function=new_func, greater_is_better=not self.minimize)
+    self.metric_name = name
+    direction = 'minimize' if minimize else 'maximize'
+    print('Custom metric {name} to {direction} has been equipped'.format(name=name, direction=direction))
+
+    if hasattr(self, 'engineer'):
+        self.engineer.metric = self.metric
+    else:
+        return self.metric
+
+  def add_pareto_metric(self, func, name):
+    assert 'y' in func.__code__.co_varnames and 'y_pred' in func.__code__.co_varnames and func.__code__.co_varnames[0] == 'self' and func.__code__.co_argcount == 3, 'must contain 3 arguments self,y,y_pred in order'
+    try:
+        result = func(self, np.array([1, 1]), np.array([2, 2]))
+    except Exception as e:
+        print(e)
+        raise Exception('fails to pass test inputs np.array([1,1]),np.array([2,2])')
+    assert isinstance(result, numbers.Number)
+
+    direction = 'minimize' if self.minimize else 'maximize'
+    print('Metric {name} to {direction} has been equipped as pareto metric {length}'.format(name=name, direction=direction,length=len(self.pareto_metrics)+1))
+
+    self.pareto_metrics.append(func)
+
+  def custom_operation(self,func,func_name,arity):
+    custom_func=make_function(function=func,
+                              name=func_name,
+                              arity=arity)
+
+    self.operations_copy+=(custom_func,)
+    self.engineer.function_set+=(custom_func,)
+
+  def transform(self,X,y=None):
+
+    assert self.fitted, 'engineer needs to be fitted'
+    X=check_array(X)
+
+    return self.engineer.transform(X)
+
+  def fit_transform(self,X,y):
+
+    return self.fit(X,y).transform(X)
+
+  def feature_importances(self):
+
+    assert self.fitted, 'engineer needs to be fitted'
+
+    return self.leaderboard
