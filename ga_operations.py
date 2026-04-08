@@ -86,14 +86,17 @@ class OperationsMixin:
 
     def _build_pset(self) -> gp.PrimitiveSetTyped:
         pset = gp.PrimitiveSetTyped("MAIN", [], NumE)
+        self._debug_log("Building primitive set.")
 
         for c in self.numeric_cols:
             term = NumE(pl.col(c).cast(pl.Float64))
             pset.addTerminal(term, NumE, name=self._safe_ident(f"num__{c}"))
+        self._debug_log(f"Registered numeric terminals: {len(self.numeric_cols)}")
 
         for c in self.categorical_cols:
             term = CatE(pl.col(c).cast(pl.Utf8))
             pset.addTerminal(term, CatE, name=self._safe_ident(f"cat__{c}"))
+        self._debug_log(f"Registered categorical terminals: {len(self.categorical_cols)}")
 
         def _create_lit(x: float) -> NumE:
             return NumE(pl.lit(x))
@@ -191,11 +194,17 @@ class OperationsMixin:
                 arg_tys = [(CatE if i in spec.cat_pos else NumE) for i in range(spec.arity)]
                 add_op("te", op, arg_tys)
 
+        self._debug_log(
+            "Primitive set complete: "
+            f"elementary={len(self._ops_elementary)}, groupby={len(self._ops_groupby)}, "
+            f"timeseries={len(self._ops_ts)}, target={len(self._ops_target)}"
+        )
         return pset
 
     def _ensure_deap(self):
         if self._pset is None:
             self._pset = self._build_pset()
+            self._debug_log("Primitive set initialized.")
 
         if self._toolbox is None:
             if self.enable_multi_objective:
@@ -225,3 +234,7 @@ class OperationsMixin:
             toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=self.max_tree_height))
 
             self._toolbox = toolbox
+            self._debug_log(
+                "DEAP toolbox initialized "
+                f"(multi_objective={self.enable_multi_objective}, init_depth=[{self.init_min_depth}, {self.init_max_depth}])."
+            )

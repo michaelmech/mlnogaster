@@ -56,6 +56,7 @@ class HillClimbMixin:
 
     def _fit_hill_climb(self, df: pl.DataFrame, y_np: np.ndarray):
         self._ensure_deap()
+        self._debug_log("Starting hill-climb fit.")
 
         def _patch_legacy_constants(expr: str) -> str:
             return re.sub(r"(?<![\w])_create_lit(?!\s*\()", "_create_lit(0.0)", expr)
@@ -66,6 +67,7 @@ class HillClimbMixin:
 
         resume_checkpoint = self._load_checkpoint_file()
         if resume_checkpoint is not None:
+            self._debug_log("Loading hill-climb state from checkpoint.")
             selected_inds = [
                 creator.Individual(gp.PrimitiveTree.from_string(_patch_legacy_constants(expr), self._pset))
                 for expr in resume_checkpoint["selected_programs"]
@@ -80,6 +82,7 @@ class HillClimbMixin:
 
             no_improve0 = int(resume_checkpoint.get("no_improve", 0))
         else:
+            self._debug_log("No checkpoint found; initializing fresh hill-climb state.")
             remaining_identity = set(self.numeric_cols)
             selected_inds: List[Any] = []
             selected_names: List[str] = []
@@ -103,6 +106,9 @@ class HillClimbMixin:
             best_X = build_X(selected_inds)
             best_score = self._hc_score(best_X, y_np)
             no_improve0 = 0
+        self._debug_log(
+            f"Initial hill-climb score={best_score:.6f}, selected_features={len(selected_inds)}"
+        )
 
         state = HillClimbMixin._HCState(
             selected_inds=selected_inds,
@@ -126,6 +132,9 @@ class HillClimbMixin:
             sc = self._hc_score(X_try[mask], y_np[mask])
 
             if self._hc_improved(sc, state.best_score):
+                self._debug_log(
+                    f"Hill-climb accepted individual: score {state.best_score:.6f} -> {sc:.6f}"
+                )
                 state.selected_inds.append(individual)
                 state.selected_names.append(str(individual))
                 state.best_X = X_try
@@ -154,6 +163,9 @@ class HillClimbMixin:
                                 state.best_X = X_trial
                                 state.best_score = sc2
                                 changed = True
+                                self._debug_log(
+                                    f"Hill-climb pruned feature at index {j}; new score={sc2:.6f}"
+                                )
                                 break
 
                 accepted_count = len(state.selected_inds)
@@ -178,6 +190,7 @@ class HillClimbMixin:
         for ind, fit in zip(pop, map(self._toolbox.evaluate, pop)):
             ind.fitness.values = fit
         hof.update(pop)
+        self._debug_log(f"Initial hill-climb GA stage evaluated: population={len(pop)}")
 
         best_hist = [hof[0].fitness.values[0]]
         no_improve_ga = 0
@@ -204,6 +217,7 @@ class HillClimbMixin:
 
             cur_best = hof[0].fitness.values[0]
             best_hist.append(cur_best)
+            self._debug_log(f"Hill-climb generation {_gen}: best={cur_best:.6f}")
 
             if self.early_stop_rounds is not None:
                 if len(best_hist) >= 2 and (best_hist[-2] - best_hist[-1]) <= self.early_stop_tol:
@@ -211,6 +225,7 @@ class HillClimbMixin:
                 else:
                     no_improve_ga = 0
                 if no_improve_ga >= self.early_stop_rounds:
+                    self._debug_log(f"Hill-climb early stopping at generation {_gen}.")
                     break
 
         self.hof_ = hof
@@ -231,6 +246,7 @@ class HillClimbMixin:
         if self.checkpoint_path is not None:
             with open(self.checkpoint_path, "w") as f:
                 json.dump(self.get_hc_checkpoint(), f)
+            self._debug_log(f"Wrote hill-climb checkpoint to {self.checkpoint_path}.")
 
         return self
 
