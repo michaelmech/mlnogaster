@@ -2,7 +2,7 @@ import json
 
 import numpy as np
 import polars as pl
-from deap import creator, gp
+from deap import base, creator, gp
 
 from GAfeatureengineer import GAFeatureEngineerDEAP
 
@@ -270,3 +270,29 @@ def test_incest_penalty_kicks_in_only_above_threshold():
 
     assert eng._incest_penalty(Dummy()) > 0.0
     assert eng._incest_penalty(DummyLow()) == 0.0
+
+
+def test_multi_objective_fit_recovers_from_stale_creator_weights():
+    # Simulate a polluted interpreter session where a stale DEAP creator type
+    # exists with incorrect dimensionality for multi-objective fitness.
+    if hasattr(creator, "IndividualMO"):
+        delattr(creator, "IndividualMO")
+    if hasattr(creator, "FitnessMinMO"):
+        delattr(creator, "FitnessMinMO")
+    creator.create("FitnessMinMO", base.Fitness, weights=(-1.0,))
+
+    df = _tiny_df()
+    y = np.array([0.5, 0.6, 0.8, 1.0, 1.1, 1.3], dtype=float)
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        enable_multi_objective=True,
+        population_size=6,
+        generations=1,
+        hall_of_fame=2,
+        random_state=31,
+    )
+
+    eng.fit(df, y)
+
+    assert len(creator.FitnessMinMO.weights) == 2
+    assert len(eng.best_programs_) == 2
