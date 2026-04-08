@@ -59,6 +59,30 @@ class GAFeatureEngineerDEAP(
         max_tree_height: int = 10,
         hall_of_fame: int = 5,
         parsimony_coefficient: float = 1e-4,
+        enable_aging: bool = False,
+        aging_penalty: float = 0.0,
+        aging_half_life_generations: float = 8.0,
+        enable_fitness_sharing: bool = False,
+        fitness_sharing_strength: float = 0.0,
+        fitness_sharing_memory_size: int = 200,
+        enable_adaptive_rates: bool = False,
+        adaptive_mutation_min: float = 0.1,
+        adaptive_mutation_max: float = 0.9,
+        adaptive_tournament_min: int = 2,
+        adaptive_tournament_max: Optional[int] = None,
+        enable_program_pruning: bool = False,
+        prune_top_k: int = 3,
+        prune_max_steps: int = 3,
+        enable_extinction: bool = False,
+        extinction_stagnation_rounds: int = 5,
+        extinction_reseed_fraction: float = 0.3,
+        enable_multi_objective: bool = False,
+        enable_incest_penalty: bool = False,
+        incest_penalty_strength: float = 0.0,
+        lineage_depth: int = 6,
+        incest_similarity_threshold: float = 0.25,
+        disable_impostor_if_dominant: bool = True,
+        impostor_dominance_threshold: float = 0.75,
         early_stop_rounds: Optional[int] = 7,
         early_stop_tol: float = 1e-6,
         hc_start_with_one_identity: bool = True,
@@ -108,6 +132,32 @@ class GAFeatureEngineerDEAP(
         self.max_tree_height = int(max_tree_height)
         self.hall_of_fame = int(hall_of_fame)
         self.parsimony_coefficient = float(parsimony_coefficient)
+        self.enable_aging = bool(enable_aging)
+        self.aging_penalty = float(aging_penalty)
+        self.aging_half_life_generations = float(aging_half_life_generations)
+        self.enable_fitness_sharing = bool(enable_fitness_sharing)
+        self.fitness_sharing_strength = float(fitness_sharing_strength)
+        self.fitness_sharing_memory_size = int(fitness_sharing_memory_size)
+        self.enable_adaptive_rates = bool(enable_adaptive_rates)
+        self.adaptive_mutation_min = float(adaptive_mutation_min)
+        self.adaptive_mutation_max = float(adaptive_mutation_max)
+        self.adaptive_tournament_min = int(adaptive_tournament_min)
+        self.adaptive_tournament_max = (
+            int(adaptive_tournament_max) if adaptive_tournament_max is not None else int(tournament_size)
+        )
+        self.enable_program_pruning = bool(enable_program_pruning)
+        self.prune_top_k = int(prune_top_k)
+        self.prune_max_steps = int(prune_max_steps)
+        self.enable_extinction = bool(enable_extinction)
+        self.extinction_stagnation_rounds = int(extinction_stagnation_rounds)
+        self.extinction_reseed_fraction = float(extinction_reseed_fraction)
+        self.enable_multi_objective = bool(enable_multi_objective)
+        self.enable_incest_penalty = bool(enable_incest_penalty)
+        self.incest_penalty_strength = float(incest_penalty_strength)
+        self.lineage_depth = int(lineage_depth)
+        self.incest_similarity_threshold = float(incest_similarity_threshold)
+        self.disable_impostor_if_dominant = bool(disable_impostor_if_dominant)
+        self.impostor_dominance_threshold = float(impostor_dominance_threshold)
         self.early_stop_rounds = None if early_stop_rounds is None else int(early_stop_rounds)
         self.early_stop_tol = float(early_stop_tol)
 
@@ -139,5 +189,17 @@ class GAFeatureEngineerDEAP(
         self._pset: Optional[gp.PrimitiveSetTyped] = None
         self._toolbox: Optional[base.Toolbox] = None
         self._fitted: bool = False
+        self._lineage_counter: int = 0
+
+        if self.adaptive_mutation_min > self.adaptive_mutation_max:
+            raise ValueError("adaptive_mutation_min must be <= adaptive_mutation_max")
+        if self.adaptive_tournament_min > self.adaptive_tournament_max:
+            raise ValueError("adaptive_tournament_min must be <= adaptive_tournament_max")
+        if not (0.0 <= self.extinction_reseed_fraction <= 1.0):
+            raise ValueError("extinction_reseed_fraction must be in [0, 1]")
+        if self.lineage_depth < 1:
+            raise ValueError("lineage_depth must be >= 1")
+        if not (0.0 <= self.impostor_dominance_threshold <= 1.0):
+            raise ValueError("impostor_dominance_threshold must be in [0, 1]")
 
         self._register_default_ops()

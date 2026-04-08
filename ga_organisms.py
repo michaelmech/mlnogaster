@@ -9,6 +9,9 @@ from feature_engineering_types import NumE
 
 
 class OrganismMixin:
+    def _impostor_expr(self, seed: int):
+        return pl.int_range(0, pl.len()).shuffle(seed=seed + int(self._rng.randint(0, 10_000))).cast(pl.Float64)
+
     def _compile_to_numexpr(self, individual) -> NumE:
         self._ensure_deap()
         compiled = gp.compile(expr=individual, pset=self._pset)

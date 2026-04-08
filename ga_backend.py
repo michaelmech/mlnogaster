@@ -53,7 +53,40 @@ class BackendMixin:
             except TypeError as e:
                 raise TypeError("In ga mode, metric must have signature metric(y_true, y_pred).") from e
 
+        def _new_lineage_id() -> int:
+            self._lineage_counter += 1
+            return self._lineage_counter
+
+        def _assign_lineage(individual, parents: Optional[list[tuple[int, ...]]] = None) -> None:
+            parent_lineages = [tuple(p) for p in (parents or [])]
+            flat = []
+            for ln in parent_lineages:
+                flat.extend(ln)
+            flat.append(_new_lineage_id())
+            individual.lineage = tuple(flat[-self.lineage_depth :])
+
+            if len(parent_lineages) >= 2:
+                overlap = self._lineage_overlap_ratio(parent_lineages[0], parent_lineages[1])
+                individual.inbreeding_coeff = overlap
+            else:
+                individual.inbreeding_coeff = 0.0
+
+        def _first_objective(ind) -> float:
+            vals = ind.fitness.values
+            return float(vals[0] if len(vals) else np.inf)
+
+        def _impostor_ratio(population) -> float:
+            if not population:
+                return 0.0
+            hits = sum(1 for ind in population if "impostor_noise" in str(ind))
+            return float(hits / len(population))
+
         def _eval_ga(individual):
+            if not hasattr(individual, "birth_generation"):
+                individual.birth_generation = generation_state["generation"]
+            if not hasattr(individual, "lineage"):
+                _assign_lineage(individual)
+
             compiled = gp.compile(expr=individual, pset=self._pset)
             out = compiled() if callable(compiled) else compiled
 
@@ -70,31 +103,64 @@ class BackendMixin:
 
             metric_val = self._compute_single_metric(y_np[mask], pred[mask])
             fitness_val = -metric_val if self.maximize_metric else metric_val
-            return (fitness_val + self.parsimony_coefficient * len(individual),)
+            age_pen = self._age_penalty(
+                birth_generation=getattr(individual, "birth_generation", generation_state["generation"]),
+                current_generation=generation_state["generation"],
+            )
+            novelty_pen = self._novelty_penalty(individual, elite_program_memory)
+            incest_pen = self._incest_penalty(individual)
+            adjusted = fitness_val + self.parsimony_coefficient * len(individual) + age_pen + novelty_pen + incest_pen
+            if self.enable_multi_objective:
+                return (adjusted, float(len(individual)))
+            return (adjusted,)
 
         self._toolbox.register("evaluate", _eval_ga)
 
         pop = self._toolbox.population(n=self.population_size)
         hof = tools.HallOfFame(maxsize=self.hall_of_fame)
+        generation_state = {"generation": 0}
+        elite_program_memory: list[str] = []
+        impostor_disabled = False
+
+        for ind in pop:
+            ind.birth_generation = 0
+            _assign_lineage(ind)
 
         for ind, fit in zip(pop, map(self._toolbox.evaluate, pop)):
             ind.fitness.values = fit
         hof.update(pop)
+        elite_program_memory.extend(str(ind) for ind in hof)
+        elite_program_memory = elite_program_memory[-self.fitness_sharing_memory_size :]
 
-        best_hist = [hof[0].fitness.values[0]]
+        best_hist = [_first_objective(hof[0])]
         no_improve = 0
 
         for _gen in range(1, self.generations + 1):
-            offspring = list(map(self._toolbox.clone, self._toolbox.select(pop, len(pop))))
+            generation_state["generation"] = _gen
+            mutpb_cur, tourn_cur = self._adaptive_rates(pop)
+
+            if self.enable_multi_objective:
+                offspring = list(map(self._toolbox.clone, tools.selNSGA2(pop, len(pop))))
+            else:
+                offspring = list(map(self._toolbox.clone, tools.selTournament(pop, len(pop), tournsize=tourn_cur)))
 
             for c1, c2 in zip(offspring[::2], offspring[1::2]):
                 if self._rng.random() < self.cxpb:
+                    p1_lineage = tuple(getattr(c1, "lineage", ()))
+                    p2_lineage = tuple(getattr(c2, "lineage", ()))
                     self._toolbox.mate(c1, c2)
+                    c1.birth_generation = _gen
+                    c2.birth_generation = _gen
+                    _assign_lineage(c1, parents=[p1_lineage, p2_lineage])
+                    _assign_lineage(c2, parents=[p2_lineage, p1_lineage])
                     del c1.fitness.values, c2.fitness.values
 
             for mut in offspring:
-                if self._rng.random() < self.mutpb:
+                if self._rng.random() < mutpb_cur:
+                    prev_lineage = tuple(getattr(mut, "lineage", ()))
                     self._toolbox.mutate(mut)
+                    mut.birth_generation = _gen
+                    _assign_lineage(mut, parents=[prev_lineage])
                     del mut.fitness.values
 
             invalid = [ind for ind in offspring if not ind.fitness.valid]
@@ -103,8 +169,26 @@ class BackendMixin:
 
             pop[:] = offspring
             hof.update(pop)
+            elite_program_memory.extend(str(ind) for ind in hof)
+            elite_program_memory = elite_program_memory[-self.fitness_sharing_memory_size :]
 
-            cur_best = hof[0].fitness.values[0]
+            if (
+                self.enable_impostor_op
+                and self.disable_impostor_if_dominant
+                and not impostor_disabled
+                and _impostor_ratio(pop) >= self.impostor_dominance_threshold
+            ):
+                impostor_disabled = True
+                pop = [ind for ind in pop if "impostor_noise" not in str(ind)]
+                while len(pop) < self.population_size:
+                    fresh = self._toolbox.individual()
+                    fresh.birth_generation = _gen
+                    _assign_lineage(fresh)
+                    fresh.fitness.values = self._toolbox.evaluate(fresh)
+                    pop.append(fresh)
+                hof.update(pop)
+
+            cur_best = _first_objective(hof[0])
             best_hist.append(cur_best)
 
             if self.early_stop_rounds is not None:
@@ -112,8 +196,55 @@ class BackendMixin:
                     no_improve += 1
                 else:
                     no_improve = 0
-                if no_improve >= self.early_stop_rounds:
+                if self.enable_extinction and no_improve >= self.extinction_stagnation_rounds:
+                    n_reseed = max(1, int(self.population_size * self.extinction_reseed_fraction))
+                    pop_sorted = sorted(pop, key=_first_objective, reverse=True)
+                    survivors = pop_sorted[:-n_reseed] if n_reseed < len(pop_sorted) else []
+                    reseeded = []
+                    for _ in range(n_reseed):
+                        ind = self._toolbox.individual()
+                        ind.birth_generation = _gen
+                        _assign_lineage(ind)
+                        ind.fitness.values = self._toolbox.evaluate(ind)
+                        reseeded.append(ind)
+                    pop = survivors + reseeded
+                    if self.enable_multi_objective:
+                        pop = tools.selNSGA2(pop, k=min(len(pop), self.population_size))
+                    hof.update(pop)
+                    no_improve = 0
+                elif no_improve >= self.early_stop_rounds:
                     break
+
+        if self.enable_program_pruning and len(hof) > 0:
+            hof_list = [self._toolbox.clone(ind) for ind in hof]
+            top_k = min(self.prune_top_k, len(hof_list))
+            for i in range(top_k):
+                base_ind = self._toolbox.clone(hof_list[i])
+                improved = True
+                steps = 0
+                while improved and len(base_ind) > 1 and steps < self.prune_max_steps:
+                    improved = False
+                    base_score = _first_objective(base_ind)
+                    for j in range(len(base_ind)):
+                        candidate = self._toolbox.clone(base_ind)
+                        del candidate[j]
+                        if len(candidate) == 0:
+                            continue
+                        try:
+                            fit = self._toolbox.evaluate(candidate)
+                        except Exception:
+                            continue
+                        candidate.fitness.values = fit
+                        cand_score = _first_objective(candidate)
+                        if cand_score <= base_score + self.hc_tol:
+                            base_ind = candidate
+                            improved = True
+                            steps += 1
+                            break
+                hof_list[i] = base_ind
+            new_hof = tools.HallOfFame(maxsize=self.hall_of_fame)
+            new_hof.update(hof_list)
+            hof = new_hof
 
         self.hof_ = hof
         self.best_programs_ = [str(ind) for ind in hof]

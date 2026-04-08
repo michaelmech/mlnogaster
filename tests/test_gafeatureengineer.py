@@ -172,3 +172,83 @@ def test_create_operator_inferrs_numeric_args_and_online_flag():
     )
     te_spec = eng._custom_ops["te_custom"]
     assert te_spec.online is True
+
+
+def test_inspiration_mapped_aging_penalty_grows_with_generation():
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        population_size=4,
+        generations=1,
+        hall_of_fame=1,
+        enable_aging=True,
+        aging_penalty=0.2,
+        aging_half_life_generations=4,
+    )
+
+    p0 = eng._age_penalty(birth_generation=0, current_generation=0)
+    p4 = eng._age_penalty(birth_generation=0, current_generation=4)
+    p8 = eng._age_penalty(birth_generation=0, current_generation=8)
+
+    assert p0 == 0.0
+    assert p8 > p4 > p0
+
+
+def test_inspiration_mapped_fitness_sharing_penalizes_duplicates():
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        population_size=4,
+        generations=1,
+        hall_of_fame=1,
+        enable_fitness_sharing=True,
+        fitness_sharing_strength=0.5,
+    )
+
+    candidate = "el__identity(num__f1)"
+    same = eng._novelty_penalty(candidate, [candidate])
+    different = eng._novelty_penalty(candidate, ["el__identity(num__f2)"])
+
+    assert same > 0.45
+    assert same > different >= 0.0
+
+
+def test_adaptive_rates_raise_mutation_when_diversity_is_low():
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        population_size=4,
+        generations=1,
+        hall_of_fame=1,
+        enable_adaptive_rates=True,
+        adaptive_mutation_min=0.1,
+        adaptive_mutation_max=0.9,
+        adaptive_tournament_min=2,
+        adaptive_tournament_max=6,
+    )
+
+    low_div_pop = ["p", "p", "p", "p"]
+    high_div_pop = ["p1", "p2", "p3", "p4"]
+    low_mut, low_tourn = eng._adaptive_rates(low_div_pop)
+    high_mut, high_tourn = eng._adaptive_rates(high_div_pop)
+
+    assert low_mut > high_mut
+    assert low_tourn < high_tourn
+
+
+def test_incest_penalty_kicks_in_only_above_threshold():
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        population_size=4,
+        generations=1,
+        hall_of_fame=1,
+        enable_incest_penalty=True,
+        incest_penalty_strength=0.7,
+        incest_similarity_threshold=0.5,
+    )
+
+    class Dummy:
+        inbreeding_coeff = 0.6
+
+    class DummyLow:
+        inbreeding_coeff = 0.4
+
+    assert eng._incest_penalty(Dummy()) > 0.0
+    assert eng._incest_penalty(DummyLow()) == 0.0
