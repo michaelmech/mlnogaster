@@ -207,13 +207,23 @@ class OperationsMixin:
             self._debug_log("Primitive set initialized.")
 
         if self._toolbox is None:
+            def _reset_creator_type(name: str) -> None:
+                if hasattr(creator, name):
+                    delattr(creator, name)
+
             if self.enable_multi_objective:
+                if hasattr(creator, "FitnessMinMO") and len(creator.FitnessMinMO.weights) != 2:
+                    _reset_creator_type("IndividualMO")
+                    _reset_creator_type("FitnessMinMO")
                 if not hasattr(creator, "FitnessMinMO"):
                     creator.create("FitnessMinMO", base.Fitness, weights=(-1.0, -1.0))
                 if not hasattr(creator, "IndividualMO"):
                     creator.create("IndividualMO", gp.PrimitiveTree, fitness=creator.FitnessMinMO)
                 individual_cls = creator.IndividualMO
             else:
+                if hasattr(creator, "FitnessMin") and len(creator.FitnessMin.weights) != 1:
+                    _reset_creator_type("Individual")
+                    _reset_creator_type("FitnessMin")
                 if not hasattr(creator, "FitnessMin"):
                     creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
                 if not hasattr(creator, "Individual"):
