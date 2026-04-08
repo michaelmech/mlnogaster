@@ -12,12 +12,19 @@ except Exception:  # pragma: no cover
 
 class BackendMixin:
     def fit(self, X: Any, y: Any, target_col: Optional[str] = None):
+        self._debug_log("Starting fit().")
         df = self._to_polars(X)
+        self._debug_df("Input dataframe after conversion", df)
         self.numeric_cols = self._infer_numeric_cols(df)
+        self._debug_log(f"Inferred numeric columns: {self.numeric_cols}")
+        self._debug_log(f"Configured categorical columns: {self.categorical_cols}")
 
         y_np = np.asarray(y).reshape(-1).astype(float)
         if y_np.shape[0] != df.height:
             raise ValueError("y length != number of rows in X")
+        self._debug_log(
+            f"Target vector prepared: len={len(y_np)}, finite={int(np.isfinite(y_np).sum())}"
+        )
 
         if target_col is None:
             target_col = "__target__"
@@ -27,10 +34,12 @@ class BackendMixin:
             df_te = df.with_columns(pl.Series(target_col, y_np))
             self._fit_target_encoders(df_te, target_col=target_col)
             df = self._apply_target_encoders(df)
+            self._debug_df("Dataframe after target encoding", df)
 
         self._pset = None
         self._toolbox = None
         self._ensure_deap()
+        self._debug_log("DEAP structures initialized.")
 
         allowed_modes = {"ga", "hill_climb"}
         if self.search_mode not in allowed_modes:
@@ -129,6 +138,9 @@ class BackendMixin:
         for ind, fit in zip(pop, map(self._toolbox.evaluate, pop)):
             ind.fitness.values = fit
         hof.update(pop)
+        self._debug_log(
+            f"Initial GA population evaluated: population={len(pop)}, hof_size={len(hof)}"
+        )
         elite_program_memory.extend(str(ind) for ind in hof)
         elite_program_memory = elite_program_memory[-self.fitness_sharing_memory_size :]
 
@@ -138,6 +150,9 @@ class BackendMixin:
         for _gen in range(1, self.generations + 1):
             generation_state["generation"] = _gen
             mutpb_cur, tourn_cur = self._adaptive_rates(pop)
+            self._debug_log(
+                f"Generation {_gen}: mutpb={mutpb_cur:.4f}, tournament_size={tourn_cur}, best={_first_objective(hof[0]):.6f}"
+            )
 
             if self.enable_multi_objective:
                 offspring = list(map(self._toolbox.clone, tools.selNSGA2(pop, len(pop))))
@@ -213,6 +228,7 @@ class BackendMixin:
                     hof.update(pop)
                     no_improve = 0
                 elif no_improve >= self.early_stop_rounds:
+                    self._debug_log(f"Early stopping at generation {_gen}.")
                     break
 
         if self.enable_program_pruning and len(hof) > 0:
@@ -252,14 +268,20 @@ class BackendMixin:
             self._sanitize_feature_name(self._individual_to_symbolic(ind)) for ind in hof
         ])
         self.best_fitness_ = [float(ind.fitness.values[0]) for ind in hof]
+        self._debug_log(
+            f"Fit complete. Best programs={len(self.best_programs_)}, best_fitness={self.best_fitness_[0] if self.best_fitness_ else None}"
+        )
 
         self._fitted = True
         return self
 
     def transform(self, X: Any) -> pl.DataFrame:
+        self._debug_log("Starting transform().")
         df = self._to_polars(X)
+        self._debug_df("Transform input dataframe after conversion", df)
         if self._te_maps and self._te_target_col is not None:
             df = self._apply_target_encoders(df)
+            self._debug_df("Transform dataframe after target encoding", df)
 
         self._ensure_deap()
 
@@ -282,6 +304,7 @@ class BackendMixin:
 
             out_df = lf.collect()
             base_cols = list(self.index_cols) + [c for c in self.numeric_cols if c in out_df.columns]
+            self._debug_df("Transform output dataframe (hill_climb)", out_df)
             return out_df.select(base_cols + list(names))
 
         if self.hof_ is None:
@@ -303,6 +326,7 @@ class BackendMixin:
 
         out_df = lf.collect()
         base_cols = list(self.index_cols) + [c for c in self.numeric_cols if c in out_df.columns]
+        self._debug_df("Transform output dataframe (ga)", out_df)
         return out_df.select(base_cols + list(names))
 
     def _to_polars(self, X: Any) -> pl.DataFrame:
@@ -333,9 +357,11 @@ class BackendMixin:
 
     def _fit_target_encoders(self, df: pl.DataFrame, target_col: str) -> None:
         self._te_global_mean = float(df.select(pl.col(target_col).mean()).item())
+        self._debug_log(f"Target encoding global mean: {self._te_global_mean:.6f}")
         smooth = float(self.target_encoding_smoothing)
         for cat in self.categorical_cols:
             if cat not in df.columns:
+                self._debug_log(f"Skipping target encoding for missing categorical column '{cat}'.")
                 continue
             tec = self._te_colname(cat, target_col)
             agg = (
@@ -347,6 +373,9 @@ class BackendMixin:
                 .select([cat, tec])
             )
             self._te_maps[cat] = agg
+            self._debug_log(
+                f"Built target encoder map for '{cat}' with {agg.height} groups."
+            )
 
     def _apply_target_encoders(self, df: pl.DataFrame) -> pl.DataFrame:
         assert self._te_target_col is not None

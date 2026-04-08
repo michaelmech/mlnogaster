@@ -14,10 +14,14 @@ class OrganismMixin:
 
     def _compile_to_numexpr(self, individual) -> NumE:
         self._ensure_deap()
+        self._debug_log(f"Compiling individual: {individual}")
         compiled = gp.compile(expr=individual, pset=self._pset)
         out = compiled() if callable(compiled) else compiled
         if not isinstance(out, NumE):
             raise TypeError("Program did not compile to NumE.")
+        self._debug_log(
+            f"Compiled individual with pre_cols={len(out.pre_cols)} and expr={out.expr}"
+        )
         return out
 
     def _program_to_numpy(self, df: pl.DataFrame, individual) -> np.ndarray:
@@ -35,6 +39,9 @@ class OrganismMixin:
             .to_series()
             .to_numpy()
             .astype(float, copy=False)
+        )
+        self._debug_log(
+            f"Program evaluated to numpy array: shape={arr.shape}, finite={int(np.isfinite(arr).sum())}"
         )
         return arr
 

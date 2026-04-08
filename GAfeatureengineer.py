@@ -92,6 +92,7 @@ class GAFeatureEngineerDEAP(
         checkpoint_every_accepts=np.inf,
         search_mode: SearchMode = "ga",
         verbose: bool = False,
+        debug: bool = False,
     ):
         self.checkpoint_path = checkpoint_path
         self.checkpoint_every_accepts = checkpoint_every_accepts
@@ -106,7 +107,8 @@ class GAFeatureEngineerDEAP(
         self.target_encoding_smoothing = float(target_encoding_smoothing)
         self.enable_impostor_op = bool(enable_impostor_op)
         self._tmp_col_counter = 0
-        self.verbose = bool(verbose)
+        self.verbose = bool(verbose or debug)
+        self.debug = bool(debug)
 
         self.metric = metric
         self.maximize_metric = bool(maximize_metric)
@@ -203,3 +205,15 @@ class GAFeatureEngineerDEAP(
             raise ValueError("impostor_dominance_threshold must be in [0, 1]")
 
         self._register_default_ops()
+
+    def _debug_log(self, msg: str) -> None:
+        if self.verbose:
+            print(f"[GAFeatureEngineerDEAP] {msg}")
+
+    def _debug_df(self, label: str, df: pl.DataFrame, rows: int = 3) -> None:
+        if not self.verbose:
+            return
+        preview = df.head(rows)
+        self._debug_log(
+            f"{label}: shape={df.shape}, columns={df.columns}, preview_rows={rows}\n{preview}"
+        )
