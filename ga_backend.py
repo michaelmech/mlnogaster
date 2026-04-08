@@ -106,6 +106,17 @@ class BackendMixin:
 
             pred = lf.select(out.expr.alias("__pred__")).to_series().to_numpy().astype(float, copy=False)
 
+            if pred.ndim == 0:
+                pred = np.asarray([float(pred)])
+            if pred.shape[0] == 1 and y_np.shape[0] > 1:
+                pred = np.full(y_np.shape[0], float(pred[0]), dtype=float)
+            if pred.shape[0] != y_np.shape[0]:
+                self._debug_log(
+                    "Discarding individual due to prediction length mismatch: "
+                    f"pred_len={pred.shape[0]}, target_len={y_np.shape[0]}"
+                )
+                return (1e18,)
+
             mask = np.isfinite(pred) & np.isfinite(y_np)
             if mask.sum() < max(5, int(0.2 * len(y_np))):
                 return (1e18,)
