@@ -364,7 +364,18 @@ class BackendMixin:
         if self.numeric_cols:
             return list(self.numeric_cols)
         forbidden = set(self.index_cols) | set(self.categorical_cols)
-        return [c for c in df.columns if c not in forbidden]
+        inferred: list[str] = []
+        for name, dtype in df.schema.items():
+            if name in forbidden:
+                continue
+            is_numeric = False
+            if hasattr(dtype, "is_numeric"):
+                is_numeric = bool(dtype.is_numeric())
+            elif hasattr(pl, "NUMERIC_DTYPES"):
+                is_numeric = dtype in pl.NUMERIC_DTYPES
+            if is_numeric:
+                inferred.append(name)
+        return inferred
 
     def _fit_target_encoders(self, df: pl.DataFrame, target_col: str) -> None:
         self._te_global_mean = float(df.select(pl.col(target_col).mean()).item())

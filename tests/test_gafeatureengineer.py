@@ -71,6 +71,24 @@ def test_custom_operator_can_be_compiled_and_evaluated():
     np.testing.assert_allclose(vals, np.array(df["f1"]) ** 2)
 
 
+def test_numeric_inference_excludes_string_columns_when_cat_cols_not_set():
+    df = _tiny_df()
+    y = np.array([1.0, 1.3, 1.8, 2.1, 2.5, 2.9], dtype=float)
+
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        population_size=6,
+        generations=1,
+        hall_of_fame=2,
+        random_state=11,
+    )
+    eng.fit(df, y)
+
+    assert "f1" in eng.numeric_cols
+    assert "f2" in eng.numeric_cols
+    assert "sector" not in eng.numeric_cols
+
+
 def test_hill_climb_checkpoint_write_and_resume(tmp_path):
     df = _tiny_df()
     y = np.array([1.0, 1.4, 1.9, 2.2, 2.3, 2.7], dtype=float)
