@@ -296,3 +296,43 @@ def test_multi_objective_fit_recovers_from_stale_creator_weights():
 
     assert len(creator.FitnessMinMO.weights) == 2
     assert len(eng.best_programs_) == 2
+
+
+def test_worst_fitness_tuple_matches_objective_arity():
+    eng_single = GAFeatureEngineerDEAP(search_mode="ga", enable_multi_objective=False)
+    eng_multi = GAFeatureEngineerDEAP(search_mode="ga", enable_multi_objective=True)
+
+    assert eng_single._worst_fitness_tuple(program_size=5) == (1e18,)
+    assert eng_multi._worst_fitness_tuple(program_size=5) == (1e18, 5.0)
+
+
+def test_multi_objective_fit_recovers_from_stale_individual_binding():
+    # Simulate creator pollution where IndividualMO points to a single-objective
+    # fitness class despite FitnessMinMO having two weights.
+    if hasattr(creator, "Individual"):
+        delattr(creator, "Individual")
+    if hasattr(creator, "FitnessMin"):
+        delattr(creator, "FitnessMin")
+    if hasattr(creator, "IndividualMO"):
+        delattr(creator, "IndividualMO")
+    if hasattr(creator, "FitnessMinMO"):
+        delattr(creator, "FitnessMinMO")
+
+    creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+    creator.create("FitnessMinMO", base.Fitness, weights=(-1.0, -1.0))
+    creator.create("IndividualMO", gp.PrimitiveTree, fitness=creator.FitnessMin)
+
+    df = _tiny_df()
+    y = np.array([0.4, 0.6, 0.7, 0.9, 1.0, 1.2], dtype=float)
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        enable_multi_objective=True,
+        population_size=6,
+        generations=1,
+        hall_of_fame=2,
+        random_state=41,
+    )
+
+    eng.fit(df, y)
+
+    assert len(creator.IndividualMO([]).fitness.weights) == 2

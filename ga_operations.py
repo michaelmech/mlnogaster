@@ -212,7 +212,14 @@ class OperationsMixin:
                     delattr(creator, name)
 
             if self.enable_multi_objective:
+                reset_mo = False
                 if hasattr(creator, "FitnessMinMO") and len(creator.FitnessMinMO.weights) != 2:
+                    reset_mo = True
+                if hasattr(creator, "IndividualMO"):
+                    probe = creator.IndividualMO([])
+                    if len(probe.fitness.weights) != 2:
+                        reset_mo = True
+                if reset_mo:
                     _reset_creator_type("IndividualMO")
                     _reset_creator_type("FitnessMinMO")
                 if not hasattr(creator, "FitnessMinMO"):
@@ -221,7 +228,14 @@ class OperationsMixin:
                     creator.create("IndividualMO", gp.PrimitiveTree, fitness=creator.FitnessMinMO)
                 individual_cls = creator.IndividualMO
             else:
+                reset_single = False
                 if hasattr(creator, "FitnessMin") and len(creator.FitnessMin.weights) != 1:
+                    reset_single = True
+                if hasattr(creator, "Individual"):
+                    probe = creator.Individual([])
+                    if len(probe.fitness.weights) != 1:
+                        reset_single = True
+                if reset_single:
                     _reset_creator_type("Individual")
                     _reset_creator_type("FitnessMin")
                 if not hasattr(creator, "FitnessMin"):

@@ -11,6 +11,11 @@ except Exception:  # pragma: no cover
 
 
 class BackendMixin:
+    def _worst_fitness_tuple(self, program_size: int) -> tuple[float, ...]:
+        if self.enable_multi_objective:
+            return (1e18, float(program_size))
+        return (1e18,)
+
     def fit(self, X: Any, y: Any, target_col: Optional[str] = None):
         self._debug_log("Starting fit().")
         df = self._to_polars(X)
@@ -115,11 +120,11 @@ class BackendMixin:
                     "Discarding individual due to prediction length mismatch: "
                     f"pred_len={pred.shape[0]}, target_len={y_np.shape[0]}"
                 )
-                return (1e18,)
+                return self._worst_fitness_tuple(len(individual))
 
             mask = np.isfinite(pred) & np.isfinite(y_np)
             if mask.sum() < max(5, int(0.2 * len(y_np))):
-                return (1e18,)
+                return self._worst_fitness_tuple(len(individual))
 
             metric_val = self._compute_single_metric(y_np[mask], pred[mask])
             fitness_val = -metric_val if self.maximize_metric else metric_val
