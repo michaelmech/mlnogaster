@@ -12,6 +12,19 @@ class FitnessMixin:
         return float(np.mean((y_pred - y_true) ** 2))
 
     def _compute_single_metric(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        if self.metrics is not None:
+            per_metric = {}
+            for name, fn in self.metrics.items():
+                metric_val = float(fn(y_true, y_pred))
+                if not np.isfinite(metric_val):
+                    raise ValueError(f"metrics['{name}'] must return a finite number.")
+                per_metric[name] = metric_val
+            self.last_metric_scores_ = dict(per_metric)
+            val = float(self.metric_aggregator(per_metric))
+            if not np.isfinite(val):
+                raise ValueError("metric_aggregator must return a finite number.")
+            return val
+
         fn = self.metric if self.metric is not None else self._default_metric
         val = fn(y_true, y_pred)
         if not isinstance(val, (int, float, np.number)):
@@ -22,11 +35,31 @@ class FitnessMixin:
         return val
 
     def _hc_score(self, Xmat: np.ndarray, y: np.ndarray) -> float:
-        if self.hc_metric is None:
-            raise ValueError("hc_metric must be provided for hill climbing modes.")
-        val = float(self.hc_metric(Xmat, y))
+        if self.metrics is not None:
+            per_metric = {}
+            for name, fn in self.metrics.items():
+                metric_val = float(fn(Xmat, y))
+                if not np.isfinite(metric_val):
+                    raise ValueError(f"metrics['{name}'] must return a finite number.")
+                per_metric[name] = metric_val
+            self.last_metric_scores_ = dict(per_metric)
+            self.last_hc_metric_scores_ = dict(per_metric)
+            val = float(self.metric_aggregator(per_metric))
+        elif self.hc_metrics is not None:
+            per_metric = {}
+            for name, fn in self.hc_metrics.items():
+                metric_val = float(fn(Xmat, y))
+                if not np.isfinite(metric_val):
+                    raise ValueError(f"hc_metrics['{name}'] must return a finite number.")
+                per_metric[name] = metric_val
+            self.last_hc_metric_scores_ = dict(per_metric)
+            val = float(self.hc_metric_aggregator(per_metric))
+        else:
+            if self.hc_metric is None:
+                raise ValueError("hc_metric must be provided for hill climbing modes.")
+            val = float(self.hc_metric(Xmat, y))
         if not np.isfinite(val):
-            raise ValueError("hc_metric must return a finite number.")
+            raise ValueError("Hill-climb metric must return a finite number.")
         return val
 
     def _hc_improved(self, new_score: float, old_score: float) -> bool:
