@@ -336,3 +336,37 @@ def test_multi_objective_fit_recovers_from_stale_individual_binding():
     eng.fit(df, y)
 
     assert len(creator.IndividualMO([]).fitness.weights) == 2
+
+def test_hill_climb_handles_missing_configured_cat_cols():
+    df = pl.DataFrame(
+        {
+            "Pclass": [3, 1, 3, 1, 3, 2],
+            "Sex": [0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+            "Age": [22.0, 38.0, 26.0, 35.0, 28.0, 19.0],
+            "SibSp": [1, 1, 0, 1, 0, 0],
+            "Parch": [0, 0, 0, 0, 0, 0],
+            "Fare": [7.25, 71.2833, 7.925, 53.1, 8.05, 13.0],
+            "Embarked": [2.0, 0.0, 2.0, 2.0, 2.0, 1.0],
+        }
+    )
+    y = np.array([0, 1, 1, 1, 0, 0], dtype=float)
+
+    def hc_metric(X, y_true):
+        corr = np.corrcoef(X[:, 0], y_true)[0, 1]
+        if not np.isfinite(corr):
+            return 1.0
+        return float(1.0 - corr)
+
+    eng = GAFeatureEngineerDEAP(
+        cat_cols=["ticker", "sector"],
+        search_mode="hill_climb",
+        hc_metric=hc_metric,
+        population_size=6,
+        generations=1,
+        hall_of_fame=1,
+        random_state=3,
+    )
+    eng.fit(df, y)
+
+    assert eng.categorical_cols == []
+    assert len(eng.selected_programs_) >= 1

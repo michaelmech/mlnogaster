@@ -24,6 +24,13 @@ class BackendMixin:
         self._debug_log(f"Inferred numeric columns: {self.numeric_cols}")
         self._debug_log(f"Configured categorical columns: {self.categorical_cols}")
 
+        available_categorical_cols = [c for c in self.categorical_cols if c in df.columns]
+        missing_categorical_cols = [c for c in self.categorical_cols if c not in df.columns]
+        if missing_categorical_cols:
+            for c in missing_categorical_cols:
+                self._debug_log(f"Skipping missing categorical column '{c}' for primitive terminals and encoders.")
+        self.categorical_cols = available_categorical_cols
+
         y_np = np.asarray(y).reshape(-1).astype(float)
         if y_np.shape[0] != df.height:
             raise ValueError("y length != number of rows in X")

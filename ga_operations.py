@@ -16,6 +16,11 @@ from feature_engineering_default_operations import register_default_ops
 from feature_engineering_types import CatE, NumE, OpType, OperationSpec
 
 
+def _cat_identity(x: CatE) -> CatE:
+    return x
+
+
+
 class OperationsMixin:
     def _register_default_ops(self) -> None:
         register_default_ops(self)
@@ -97,6 +102,12 @@ class OperationsMixin:
             term = CatE(pl.col(c).cast(pl.Utf8))
             pset.addTerminal(term, CatE, name=self._safe_ident(f"cat__{c}"))
         self._debug_log(f"Registered categorical terminals: {len(self.categorical_cols)}")
+
+        # Ensure typed-tree closure for CatE: DEAP's full/half-and-half initialization
+        # may request a CatE primitive at intermediate depths. Without at least one
+        # CatE -> CatE primitive, tree generation can fail with
+        # "no primitive of type CatE" even when CatE terminals exist.
+        pset.addPrimitive(_cat_identity, [CatE], CatE, name="cat__identity")
 
         def _create_lit(x: float) -> NumE:
             return NumE(pl.lit(x))
