@@ -59,7 +59,16 @@ class HillClimbMixin:
         self._debug_log("Starting hill-climb fit.")
 
         def _patch_legacy_constants(expr: str) -> str:
-            return re.sub(r"(?<![\w])_create_lit(?!\s*\()", "_create_lit(0.0)", expr)
+            # Older checkpoints may contain constants rendered as `_create_lit`
+            # or `_create_lit(<number>)`. Newer DEAP versions parse terminal tokens
+            # via `eval(token)` and will fail on bare function names. Convert both
+            # forms into plain numeric literals so they are always parseable.
+            out = re.sub(
+                r"_create_lit\s*\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*\)",
+                r"\1",
+                expr,
+            )
+            return re.sub(r"(?<![\w.])_create_lit(?![\w(])", "0.0", out)
 
         def build_X(ind_list: List[Any]) -> np.ndarray:
             cols = [self._program_to_numpy(df, ind) for ind in ind_list]
@@ -68,11 +77,23 @@ class HillClimbMixin:
         resume_checkpoint = self._load_checkpoint_file()
         if resume_checkpoint is not None:
             self._debug_log("Loading hill-climb state from checkpoint.")
-            selected_inds = [
-                creator.Individual(gp.PrimitiveTree.from_string(_patch_legacy_constants(expr), self._pset))
-                for expr in resume_checkpoint["selected_programs"]
-            ]
-            selected_names = list(resume_checkpoint["selected_programs"])
+            selected_inds = []
+            selected_names = []
+            for expr in resume_checkpoint["selected_programs"]:
+                patched = _patch_legacy_constants(expr)
+                try:
+                    ind = creator.Individual(gp.PrimitiveTree.from_string(patched, self._pset))
+                except (TypeError, ValueError):
+                    self._debug_log(f"Skipping unparsable checkpoint expression: {expr}")
+                    continue
+                selected_inds.append(ind)
+                selected_names.append(patched)
+
+            if not selected_inds:
+                self._debug_log("Checkpoint expressions were invalid; reinitializing from scratch.")
+                resume_checkpoint = None
+
+        if resume_checkpoint is not None:
 
             best_X = build_X(selected_inds)
             best_score = float(resume_checkpoint["best_score"])
@@ -263,7 +284,18 @@ class HillClimbMixin:
     def load_hc_checkpoint(self, checkpoint: dict, df: pl.DataFrame, y_np: np.ndarray):
         self._ensure_deap()
 
-        inds = [creator.Individual(gp.PrimitiveTree.from_string(expr, self._pset)) for expr in checkpoint["selected_programs"]]
+        def _patch_legacy_constants(expr: str) -> str:
+            out = re.sub(
+                r"_create_lit\s*\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*\)",
+                r"\1",
+                expr,
+            )
+            return re.sub(r"(?<![\w.])_create_lit(?![\w(])", "0.0", out)
+
+        inds = [
+            creator.Individual(gp.PrimitiveTree.from_string(_patch_legacy_constants(expr), self._pset))
+            for expr in checkpoint["selected_programs"]
+        ]
 
         def build_X(ind_list):
             cols = [self._program_to_numpy(df, ind) for ind in ind_list]
