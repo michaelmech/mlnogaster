@@ -147,21 +147,72 @@ class BackendMixin:
             self._raise_invalid_choice("search_mode", self.search_mode, list(allowed_modes))
 
         if self.search_mode == "hill_climb":
-            if self.hc_metric is None:
-                raise ValueError("hc_metric must be provided when search_mode is hill_climb.")
-            try:
-                _ = float(self.hc_metric(np.zeros((len(y_np), 1)), y_np))
-            except TypeError as e:
-                raise TypeError("In hill_climb mode, hc_metric must have signature hc_metric(X, y).") from e
+            if self.metrics is not None:
+                probe_scores = {}
+                try:
+                    for name, fn in self.metrics.items():
+                        probe_scores[name] = float(fn(np.zeros((len(y_np), 1)), y_np))
+                except TypeError as e:
+                    raise TypeError(
+                        "In hill_climb mode, each metrics callable must have signature fn(X, y)."
+                    ) from e
+                try:
+                    _ = float(self.metric_aggregator(probe_scores))
+                except TypeError as e:
+                    raise TypeError(
+                        "In hill_climb mode, metric_aggregator must have signature agg(dict[str, float])."
+                    ) from e
+            elif self.hc_metric is None and self.hc_metrics is None:
+                raise ValueError(
+                    "Provide metrics+metric_aggregator or legacy hc_metric / (hc_metrics + hc_metric_aggregator) when search_mode is hill_climb."
+                )
+            elif self.hc_metric is not None:
+                try:
+                    _ = float(self.hc_metric(np.zeros((len(y_np), 1)), y_np))
+                except TypeError as e:
+                    raise TypeError(
+                        "In hill_climb mode, hc_metric must have signature hc_metric(X, y)."
+                    ) from e
+            elif self.hc_metrics is not None:
+                probe_scores = {}
+                try:
+                    for name, fn in self.hc_metrics.items():
+                        probe_scores[name] = float(fn(np.zeros((len(y_np), 1)), y_np))
+                except TypeError as e:
+                    raise TypeError(
+                        "In hill_climb mode, each hc_metrics callable must have signature fn(X, y)."
+                    ) from e
+                try:
+                    _ = float(self.hc_metric_aggregator(probe_scores))
+                except TypeError as e:
+                    raise TypeError(
+                        "In hill_climb mode, hc_metric_aggregator must have signature agg(dict[str, float])."
+                    ) from e
 
         if self.search_mode == "hill_climb":
             return self._fit_hill_climb(df, y_np)
 
-        if self.metric is not None:
-            try:
-                _ = float(self.metric(np.zeros(3), np.zeros(3)))
-            except TypeError as e:
-                raise TypeError("In ga mode, metric must have signature metric(y_true, y_pred).") from e
+        if self.search_mode == "ga":
+            if self.metrics is not None:
+                probe_scores = {}
+                try:
+                    for name, fn in self.metrics.items():
+                        probe_scores[name] = float(fn(np.zeros(3), np.zeros(3)))
+                except TypeError as e:
+                    raise TypeError(
+                        "In ga mode, each metrics callable must have signature fn(y_true, y_pred)."
+                    ) from e
+                try:
+                    _ = float(self.metric_aggregator(probe_scores))
+                except TypeError as e:
+                    raise TypeError(
+                        "In ga mode, metric_aggregator must have signature agg(dict[str, float])."
+                    ) from e
+            elif self.metric is not None:
+                try:
+                    _ = float(self.metric(np.zeros(3), np.zeros(3)))
+                except TypeError as e:
+                    raise TypeError("In ga mode, metric must have signature metric(y_true, y_pred).") from e
 
         def _new_lineage_id() -> int:
             self._lineage_counter += 1
