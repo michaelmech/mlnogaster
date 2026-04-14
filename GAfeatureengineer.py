@@ -1,5 +1,5 @@
 import random
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 import polars as pl
@@ -38,7 +38,6 @@ class GAFeatureEngineerDEAP(
 ):
     def __init__(
         self,
-        index_cols: Tuple[str, str] = ("ticker", "date"),
         cat_cols: Optional[Sequence[str]] = None,
         categorical_cols: Optional[Sequence[str]] = None,
         max_colname_len: int = 160,
@@ -96,7 +95,6 @@ class GAFeatureEngineerDEAP(
     ):
         self.checkpoint_path = checkpoint_path
         self.checkpoint_every_accepts = checkpoint_every_accepts
-        self.index_cols = index_cols
         if cat_cols is not None and categorical_cols is not None:
             raise ValueError("Pass only one of cat_cols or categorical_cols.")
         resolved_cat_cols = cat_cols if cat_cols is not None else categorical_cols
