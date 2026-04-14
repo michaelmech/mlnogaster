@@ -319,7 +319,7 @@ class BackendMixin:
                 lf = lf.with_columns(out.expr.alias(nm))
 
             out_df = lf.collect()
-            base_cols = list(self.index_cols) + [c for c in self.numeric_cols if c in out_df.columns]
+            base_cols = list(df.columns)
             self._debug_df("Transform output dataframe (hill_climb)", out_df)
             return out_df.select(base_cols + list(names))
 
@@ -341,7 +341,7 @@ class BackendMixin:
             lf = lf.with_columns(out.expr.alias(nm))
 
         out_df = lf.collect()
-        base_cols = list(self.index_cols) + [c for c in self.numeric_cols if c in out_df.columns]
+        base_cols = list(df.columns)
         self._debug_df("Transform output dataframe (ga)", out_df)
         return out_df.select(base_cols + list(names))
 
@@ -360,15 +360,12 @@ class BackendMixin:
         else:
             raise TypeError(f"Unsupported input type: {type(X)}")
 
-        for c in self.index_cols:
-            if c not in df.columns:
-                raise ValueError(f"Missing required index column '{c}'.")
         return df
 
     def _infer_numeric_cols(self, df: pl.DataFrame) -> list[str]:
         if self.numeric_cols:
             return list(self.numeric_cols)
-        forbidden = set(self.index_cols) | set(self.categorical_cols)
+        forbidden = set(self.categorical_cols)
         inferred: list[str] = []
         for name, dtype in df.schema.items():
             if name in forbidden:

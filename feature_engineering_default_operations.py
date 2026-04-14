@@ -18,6 +18,12 @@ def register_default_ops(engine) -> None:
         params = set(inspect.signature(method).parameters.keys())
         return "min_samples" if "min_samples" in params else "min_periods"
 
+    def maybe_over(expr: pl.Expr, group_col: Any) -> pl.Expr:
+        return expr.over(group_col) if group_col else expr
+
+    def default_group_col(eng) -> Any:
+        return eng.categorical_cols[0] if getattr(eng, "categorical_cols", None) else None
+
     engine.add_elementary_op("add", 2, builder=lambda eng, a, p: a[0] + a[1], formatter=lambda args, p: fmt("add", args, p))
     engine.add_elementary_op("sub", 2, builder=lambda eng, a, p: a[0] - a[1], formatter=lambda args, p: fmt("sub", args, p))
     engine.add_elementary_op("mul", 2, builder=lambda eng, a, p: a[0] * a[1], formatter=lambda args, p: fmt("mul", args, p))
@@ -33,8 +39,9 @@ def register_default_ops(engine) -> None:
     engine.add_groupby_op(
         "cs_rank",
         1,
-        builder=lambda eng, a, p: a[0].rank(method=p.get("method", "average"), descending=p.get("descending", True)).over(
-            p.get("group_col", eng.index_cols[1])
+        builder=lambda eng, a, p: maybe_over(
+            a[0].rank(method=p.get("method", "average"), descending=p.get("descending", True)),
+            p.get("group_col", default_group_col(eng)),
         ),
         formatter=lambda args, p: fmt("cs_rank", args, p),
     )
@@ -43,67 +50,67 @@ def register_default_ops(engine) -> None:
         "cs_zscore",
         1,
         builder=lambda eng, a, p: safe_div(
-            (a[0] - a[0].mean().over(p.get("group_col", eng.index_cols[1]))),
-            a[0].std().over(p.get("group_col", eng.index_cols[1])),
+            a[0] - maybe_over(a[0].mean(), p.get("group_col", default_group_col(eng))),
+            maybe_over(a[0].std(), p.get("group_col", default_group_col(eng))),
         ),
         formatter=lambda args, p: fmt("cs_zscore", args, p),
     )
     engine.add_groupby_op(
         "grp_mean",
         1,
-        builder=lambda eng, a, p: a[0].mean().over(p.get("group_col", eng.index_cols[1])),
+        builder=lambda eng, a, p: maybe_over(a[0].mean(), p.get("group_col", default_group_col(eng))),
         formatter=lambda args, p: fmt("grp_mean", args, p),
     )
 
     min_key = rolling_min_key(pl.Expr.rolling_mean)
 
-    def ts_over_ticker(expr: pl.Expr, eng) -> pl.Expr:
-        return expr.over(eng.index_cols[0])
+    def ts_over_entity(expr: pl.Expr, p: Dict[str, Any]) -> pl.Expr:
+        return maybe_over(expr, p.get("entity_col"))
 
     engine.add_ts_op(
         "ts_lag",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(a[0].shift(int(p.get("n", 1))), eng),
+        builder=lambda eng, a, p: ts_over_entity(a[0].shift(int(p.get("n", 1))), p),
         formatter=lambda args, p: fmt("ts_lag", args, p),
     )
     engine.add_ts_op(
         "ts_diff",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(a[0].diff(int(p.get("n", 1))), eng),
+        builder=lambda eng, a, p: ts_over_entity(a[0].diff(int(p.get("n", 1))), p),
         formatter=lambda args, p: fmt("ts_diff", args, p),
     )
     engine.add_ts_op(
         "ts_pct_change",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(a[0].pct_change(int(p.get("n", 1))), eng),
+        builder=lambda eng, a, p: ts_over_entity(a[0].pct_change(int(p.get("n", 1))), p),
         formatter=lambda args, p: fmt("ts_pct_change", args, p),
     )
     engine.add_ts_op(
         "ts_mean",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(
-            a[0].rolling_mean(window_size=int(p.get("window", 5)), **{min_key: int(p.get("min_samples", 1))}), eng
+        builder=lambda eng, a, p: ts_over_entity(
+            a[0].rolling_mean(window_size=int(p.get("window", 5)), **{min_key: int(p.get("min_samples", 1))}), p
         ),
         formatter=lambda args, p: fmt("ts_mean", args, p),
     )
     engine.add_ts_op(
         "ts_std",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(
-            a[0].rolling_std(window_size=int(p.get("window", 5)), **{min_key: int(p.get("min_samples", 2))}), eng
+        builder=lambda eng, a, p: ts_over_entity(
+            a[0].rolling_std(window_size=int(p.get("window", 5)), **{min_key: int(p.get("min_samples", 2))}), p
         ),
         formatter=lambda args, p: fmt("ts_std", args, p),
     )
     engine.add_ts_op(
         "ts_ewm_mean",
         1,
-        builder=lambda eng, a, p: ts_over_ticker(
+        builder=lambda eng, a, p: ts_over_entity(
             a[0].ewm_mean(
                 span=float(p.get("span", 10.0)),
                 adjust=bool(p.get("adjust", False)),
                 ignore_nulls=bool(p.get("ignore_nulls", False)),
             ),
-            eng,
+            p,
         ),
         formatter=lambda args, p: fmt("ts_ewm_mean", args, p),
     )
