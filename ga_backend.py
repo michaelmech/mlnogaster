@@ -11,6 +11,28 @@ except Exception:  # pragma: no cover
 
 
 class BackendMixin:
+    @staticmethod
+    def _format_accepted_values(values: list[str]) -> str:
+        return ", ".join(repr(v) for v in sorted(values))
+
+    def _raise_invalid_choice(self, arg_name: str, value: Any, accepted: list[str]) -> None:
+        accepted_str = self._format_accepted_values(accepted)
+        raise ValueError(f"Invalid value for {arg_name}: {value!r}. Accepted values are: {accepted_str}.")
+
+    def _validate_columns_present(
+        self,
+        df: pl.DataFrame,
+        required_columns: list[str],
+        *,
+        context: str,
+    ) -> None:
+        missing = [c for c in required_columns if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Missing required columns for {context}: {missing}. "
+                f"Provided columns are: {list(df.columns)}."
+            )
+
     def _worst_fitness_tuple(self, program_size: int) -> tuple[float, ...]:
         if self.enable_multi_objective:
             return (1e18, float(program_size))
@@ -24,12 +46,8 @@ class BackendMixin:
         self._debug_log(f"Inferred numeric columns: {self.numeric_cols}")
         self._debug_log(f"Configured categorical columns: {self.categorical_cols}")
 
-        available_categorical_cols = [c for c in self.categorical_cols if c in df.columns]
-        missing_categorical_cols = [c for c in self.categorical_cols if c not in df.columns]
-        if missing_categorical_cols:
-            for c in missing_categorical_cols:
-                self._debug_log(f"Skipping missing categorical column '{c}' for primitive terminals and encoders.")
-        self.categorical_cols = available_categorical_cols
+        self._validate_columns_present(df, list(self.categorical_cols), context="categorical_cols")
+        self._validate_columns_present(df, list(self.numeric_cols), context="numeric_cols")
 
         y_np = np.asarray(y).reshape(-1).astype(float)
         if y_np.shape[0] != df.height:
@@ -55,7 +73,7 @@ class BackendMixin:
 
         allowed_modes = {"ga", "hill_climb"}
         if self.search_mode not in allowed_modes:
-            raise ValueError(f"search_mode must be one of {sorted(allowed_modes)}")
+            self._raise_invalid_choice("search_mode", self.search_mode, list(allowed_modes))
 
         if self.search_mode == "hill_climb":
             if self.hc_metric is None:
@@ -302,6 +320,8 @@ class BackendMixin:
         self._debug_log("Starting transform().")
         df = self._to_polars(X)
         self._debug_df("Transform input dataframe after conversion", df)
+        self._validate_columns_present(df, list(self.categorical_cols), context="categorical_cols")
+        self._validate_columns_present(df, list(self.numeric_cols), context="numeric_cols")
         if self._te_maps and self._te_target_col is not None:
             df = self._apply_target_encoders(df)
             self._debug_df("Transform dataframe after target encoding", df)
@@ -362,10 +382,17 @@ class BackendMixin:
             if not self.numeric_cols:
                 self.numeric_cols = [f"num_{i}" for i in range(X.shape[1])]
             if X.shape[1] != len(self.numeric_cols):
-                raise ValueError("numpy array column count != inferred numeric column count.")
+                raise ValueError(
+                    "numpy array column count != inferred numeric column count. "
+                    f"Expected {len(self.numeric_cols)} columns based on numeric_cols={self.numeric_cols}, "
+                    f"got {X.shape[1]}."
+                )
             df = pl.DataFrame({c: X[:, i] for i, c in enumerate(self.numeric_cols)})
         else:
-            raise TypeError(f"Unsupported input type: {type(X)}")
+            raise TypeError(
+                f"Unsupported input type: {type(X)}. "
+                "Accepted types are: polars.DataFrame, pandas.DataFrame, numpy.ndarray."
+            )
 
         return df
 
