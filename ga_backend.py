@@ -38,6 +38,77 @@ class BackendMixin:
             return (1e18, float(program_size))
         return (1e18,)
 
+    @staticmethod
+    def _dominates(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+        return all(x <= y for x, y in zip(a, b)) and any(x < y for x, y in zip(a, b))
+
+    def _pareto_ranks(self, values: list[tuple[float, ...]]) -> list[int]:
+        n = len(values)
+        if n == 0:
+            return []
+
+        dominates = [set() for _ in range(n)]
+        dominated_count = [0] * n
+        ranks = [0] * n
+        front = []
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if self._dominates(values[i], values[j]):
+                    dominates[i].add(j)
+                elif self._dominates(values[j], values[i]):
+                    dominated_count[i] += 1
+            if dominated_count[i] == 0:
+                ranks[i] = 1
+                front.append(i)
+
+        rank = 1
+        while front:
+            next_front = []
+            for i in front:
+                for j in dominates[i]:
+                    dominated_count[j] -= 1
+                    if dominated_count[j] == 0:
+                        ranks[j] = rank + 1
+                        next_front.append(j)
+            rank += 1
+            front = next_front
+
+        return ranks
+
+    def _build_leaderboard(self) -> pl.DataFrame:
+        if self.hof_ is None or len(self.hof_) == 0:
+            return pl.DataFrame(
+                {
+                    "name": pl.Series([], dtype=pl.String),
+                    "program": pl.Series([], dtype=pl.String),
+                    "fitness": pl.Series([], dtype=pl.Float64),
+                }
+            )
+
+        names = self.best_feature_names_ or [self._sanitize_feature_name(self._individual_to_symbolic(ind)) for ind in self.hof_]
+        names = self._dedupe_names(list(names))
+        programs = [str(ind) for ind in self.hof_]
+        values = [tuple(float(v) for v in ind.fitness.values) for ind in self.hof_]
+        objective_count = len(values[0]) if values else 1
+
+        data = {
+            "name": names,
+            "program": programs,
+        }
+        if objective_count == 1:
+            data["fitness"] = [vals[0] for vals in values]
+            return pl.DataFrame(data).sort("fitness")
+
+        for idx in range(objective_count):
+            data[f"fitness_{idx + 1}"] = [vals[idx] for vals in values]
+        data["pareto_rank"] = self._pareto_ranks(values)
+
+        sort_cols = ["pareto_rank"] + [f"fitness_{idx + 1}" for idx in range(objective_count)]
+        return pl.DataFrame(data).sort(sort_cols)
+
     def fit(self, X: Any, y: Any, target_col: Optional[str] = None):
         self._debug_log("Starting fit().")
         df = self._to_polars(X)
@@ -309,6 +380,7 @@ class BackendMixin:
             self._sanitize_feature_name(self._individual_to_symbolic(ind)) for ind in hof
         ])
         self.best_fitness_ = [float(ind.fitness.values[0]) for ind in hof]
+        self.leaderboard_ = self._build_leaderboard()
         self._debug_log(
             f"Fit complete. Best programs={len(self.best_programs_)}, best_fitness={self.best_fitness_[0] if self.best_fitness_ else None}"
         )

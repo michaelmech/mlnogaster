@@ -185,6 +185,7 @@ class GAFeatureEngineerDEAP(
         self.best_programs_: Optional[List[str]] = None
         self.best_fitness_: Optional[List[float]] = None
         self.best_feature_names_: Optional[List[str]] = None
+        self.leaderboard_: Optional[pl.DataFrame] = None
 
         self._pset: Optional[gp.PrimitiveSetTyped] = None
         self._toolbox: Optional[base.Toolbox] = None
