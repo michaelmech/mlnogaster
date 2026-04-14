@@ -255,6 +255,7 @@ class HillClimbMixin:
         self.best_feature_names_ = self._dedupe_names([
             self._sanitize_feature_name(self._individual_to_symbolic(ind)) for ind in hof
         ])
+        self.leaderboard_ = self._build_leaderboard()
 
         self.selected_programs_ = list(state.selected_names)
         raw = [self._individual_to_symbolic(ind) for ind in state.selected_inds]

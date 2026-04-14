@@ -44,6 +44,10 @@ def test_ga_mode_uses_custom_metric():
     assert out.height == df.height
     assert set(["ticker", "date", "f1", "f2"]).issubset(set(out.columns))
     assert len(eng.best_programs_) == 2
+    assert eng.leaderboard_ is not None
+    assert eng.leaderboard_.columns == ["name", "program", "fitness"]
+    assert eng.leaderboard_.height == 2
+    assert eng.leaderboard_["fitness"].to_list() == sorted(eng.leaderboard_["fitness"].to_list())
 
 
 def test_custom_operator_can_be_compiled_and_evaluated():
@@ -296,6 +300,9 @@ def test_multi_objective_fit_recovers_from_stale_creator_weights():
 
     assert len(creator.FitnessMinMO.weights) == 2
     assert len(eng.best_programs_) == 2
+    assert eng.leaderboard_ is not None
+    assert "pareto_rank" in eng.leaderboard_.columns
+    assert eng.leaderboard_["pareto_rank"].to_list() == sorted(eng.leaderboard_["pareto_rank"].to_list())
 
 
 def test_worst_fitness_tuple_matches_objective_arity():
