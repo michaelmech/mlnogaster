@@ -46,11 +46,8 @@ class GAFeatureEngineerDEAP(
         enable_impostor_op: bool = False,
         metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
         metrics: Optional[Dict[str, Callable[[np.ndarray, np.ndarray], float]]] = None,
-        metric_aggregator: Optional[Callable[[Dict[str, float]], float]] = None,
         maximize_metric: bool = False,
         hc_metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
-        hc_metrics: Optional[Dict[str, Callable[[np.ndarray, np.ndarray], float]]] = None,
-        hc_metric_aggregator: Optional[Callable[[Dict[str, float]], float]] = None,
         maximize_hc_metric: Optional[bool] = None,
         population_size: int = 300,
         generations: int = 25,
@@ -79,7 +76,6 @@ class GAFeatureEngineerDEAP(
         enable_extinction: bool = False,
         extinction_stagnation_rounds: int = 5,
         extinction_reseed_fraction: float = 0.3,
-        enable_multi_objective: bool = False,
         enable_incest_penalty: bool = False,
         incest_penalty_strength: float = 0.0,
         lineage_depth: int = 6,
@@ -114,7 +110,6 @@ class GAFeatureEngineerDEAP(
 
         self.metric = metric
         self.metrics = metrics
-        self.metric_aggregator = metric_aggregator
         self.maximize_metric = bool(maximize_metric)
         if isinstance(self.metric, (list, tuple)):
             raise TypeError("Pass exactly one GA metric callable (not a list/tuple).")
@@ -128,30 +123,9 @@ class GAFeatureEngineerDEAP(
                     raise TypeError("metrics keys must be strings.")
                 if not callable(fn):
                     raise TypeError(f"metrics['{name}'] must be callable.")
-            if self.metric_aggregator is None:
-                raise ValueError("metric_aggregator is required when metrics is provided.")
-        if self.metric_aggregator is not None and not callable(self.metric_aggregator):
-            raise TypeError("metric_aggregator must be callable or None.")
-
-        if hc_metric is not None and hc_metrics is not None:
-            raise ValueError("Pass only one of hc_metric or hc_metrics.")
         self.hc_metric = hc_metric
-        self.hc_metrics = hc_metrics
-        self.hc_metric_aggregator = hc_metric_aggregator
         if self.hc_metric is not None and not callable(self.hc_metric):
             raise TypeError("hc_metric must be a callable or None.")
-        if self.hc_metrics is not None:
-            if not isinstance(self.hc_metrics, dict) or not self.hc_metrics:
-                raise TypeError("hc_metrics must be a non-empty dict[str, callable].")
-            for name, fn in self.hc_metrics.items():
-                if not isinstance(name, str):
-                    raise TypeError("hc_metrics keys must be strings.")
-                if not callable(fn):
-                    raise TypeError(f"hc_metrics['{name}'] must be callable.")
-            if self.hc_metric_aggregator is None:
-                raise ValueError("hc_metric_aggregator is required when hc_metrics is provided.")
-        if self.hc_metric_aggregator is not None and not callable(self.hc_metric_aggregator):
-            raise TypeError("hc_metric_aggregator must be callable or None.")
         self.maximize_hc_metric = bool(self.maximize_metric if maximize_hc_metric is None else maximize_hc_metric)
         self.last_metric_scores_: Optional[Dict[str, float]] = None
         self.last_hc_metric_scores_: Optional[Dict[str, float]] = None
@@ -187,7 +161,7 @@ class GAFeatureEngineerDEAP(
         self.enable_extinction = bool(enable_extinction)
         self.extinction_stagnation_rounds = int(extinction_stagnation_rounds)
         self.extinction_reseed_fraction = float(extinction_reseed_fraction)
-        self.enable_multi_objective = bool(enable_multi_objective)
+        self.enable_multi_objective = bool(self.metrics is not None)
         self.enable_incest_penalty = bool(enable_incest_penalty)
         self.incest_penalty_strength = float(incest_penalty_strength)
         self.lineage_depth = int(lineage_depth)
@@ -240,6 +214,13 @@ class GAFeatureEngineerDEAP(
             raise ValueError("impostor_dominance_threshold must be in [0, 1]")
 
         self._register_default_ops()
+
+    def _mo_objective_count(self) -> int:
+        if not self.enable_multi_objective:
+            return 1
+        if self.metrics is not None:
+            return len(self.metrics)
+        return 2
 
     def _debug_log(self, msg: str) -> None:
         if self.verbose:

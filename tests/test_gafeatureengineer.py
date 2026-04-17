@@ -75,6 +75,48 @@ def test_custom_operator_can_be_compiled_and_evaluated():
     np.testing.assert_allclose(vals, np.array(df["f1"]) ** 2)
 
 
+def test_ga_multi_objective_uses_metrics_directly_without_aggregator():
+    df = _tiny_df()
+    y = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
+
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        metrics={
+            "mae": lambda y_true, y_pred: float(np.mean(np.abs(y_true - y_pred))),
+            "rmse": lambda y_true, y_pred: float(np.sqrt(np.mean((y_true - y_pred) ** 2))),
+        },
+        population_size=8,
+        generations=1,
+        hall_of_fame=2,
+        random_state=17,
+    )
+
+    eng.fit(df, y)
+
+    assert eng.leaderboard_ is not None
+    assert "fitness_1" in eng.leaderboard_.columns
+    assert "fitness_2" in eng.leaderboard_.columns
+    assert "pareto_rank" in eng.leaderboard_.columns
+    assert eng.last_metric_scores_ is not None
+    assert set(eng.last_metric_scores_.keys()) == {"mae", "rmse"}
+
+
+def test_ga_metrics_implicitly_enable_multi_objective_mode():
+    df = _tiny_df()
+    y = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
+
+    eng = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        metrics={"mae": lambda y_true, y_pred: float(np.mean(np.abs(y_true - y_pred)))},
+        population_size=6,
+        generations=1,
+        hall_of_fame=1,
+        random_state=19,
+    )
+    eng.fit(df, y)
+    assert eng.enable_multi_objective is True
+
+
 def test_numeric_inference_excludes_string_columns_when_cat_cols_not_set():
     df = _tiny_df()
     y = np.array([1.0, 1.3, 1.8, 2.1, 2.5, 2.9], dtype=float)
@@ -289,7 +331,10 @@ def test_multi_objective_fit_recovers_from_stale_creator_weights():
     y = np.array([0.5, 0.6, 0.8, 1.0, 1.1, 1.3], dtype=float)
     eng = GAFeatureEngineerDEAP(
         search_mode="ga",
-        enable_multi_objective=True,
+        metrics={
+            "mae": lambda y_true, y_pred: float(np.mean(np.abs(y_true - y_pred))),
+            "rmse": lambda y_true, y_pred: float(np.sqrt(np.mean((y_true - y_pred) ** 2))),
+        },
         population_size=6,
         generations=1,
         hall_of_fame=2,
@@ -306,11 +351,17 @@ def test_multi_objective_fit_recovers_from_stale_creator_weights():
 
 
 def test_worst_fitness_tuple_matches_objective_arity():
-    eng_single = GAFeatureEngineerDEAP(search_mode="ga", enable_multi_objective=False)
-    eng_multi = GAFeatureEngineerDEAP(search_mode="ga", enable_multi_objective=True)
+    eng_single = GAFeatureEngineerDEAP(search_mode="ga")
+    eng_multi = GAFeatureEngineerDEAP(
+        search_mode="ga",
+        metrics={
+            "mae": lambda y_true, y_pred: float(np.mean(np.abs(y_true - y_pred))),
+            "rmse": lambda y_true, y_pred: float(np.sqrt(np.mean((y_true - y_pred) ** 2))),
+        },
+    )
 
     assert eng_single._worst_fitness_tuple(program_size=5) == (1e18,)
-    assert eng_multi._worst_fitness_tuple(program_size=5) == (1e18, 5.0)
+    assert eng_multi._worst_fitness_tuple(program_size=5) == (1e18, 1e18)
 
 
 def test_multi_objective_fit_recovers_from_stale_individual_binding():
@@ -333,7 +384,10 @@ def test_multi_objective_fit_recovers_from_stale_individual_binding():
     y = np.array([0.4, 0.6, 0.7, 0.9, 1.0, 1.2], dtype=float)
     eng = GAFeatureEngineerDEAP(
         search_mode="ga",
-        enable_multi_objective=True,
+        metrics={
+            "mae": lambda y_true, y_pred: float(np.mean(np.abs(y_true - y_pred))),
+            "rmse": lambda y_true, y_pred: float(np.sqrt(np.mean((y_true - y_pred) ** 2))),
+        },
         population_size=6,
         generations=1,
         hall_of_fame=2,

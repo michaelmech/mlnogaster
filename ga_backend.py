@@ -35,6 +35,9 @@ class BackendMixin:
 
     def _worst_fitness_tuple(self, program_size: int) -> tuple[float, ...]:
         if self.enable_multi_objective:
+            objective_count = self._mo_objective_count()
+            if self.metrics is not None:
+                return tuple([1e18] * objective_count)
             return (1e18, float(program_size))
         return (1e18,)
 
@@ -148,24 +151,9 @@ class BackendMixin:
 
         if self.search_mode == "hill_climb":
             if self.metrics is not None:
-                probe_scores = {}
-                try:
-                    for name, fn in self.metrics.items():
-                        probe_scores[name] = float(fn(np.zeros((len(y_np), 1)), y_np))
-                except TypeError as e:
-                    raise TypeError(
-                        "In hill_climb mode, each metrics callable must have signature fn(X, y)."
-                    ) from e
-                try:
-                    _ = float(self.metric_aggregator(probe_scores))
-                except TypeError as e:
-                    raise TypeError(
-                        "In hill_climb mode, metric_aggregator must have signature agg(dict[str, float])."
-                    ) from e
-            elif self.hc_metric is None and self.hc_metrics is None:
-                raise ValueError(
-                    "Provide metrics+metric_aggregator or legacy hc_metric / (hc_metrics + hc_metric_aggregator) when search_mode is hill_climb."
-                )
+                raise ValueError("metrics is only supported in ga mode.")
+            elif self.hc_metric is None:
+                raise ValueError("Provide hc_metric when search_mode is hill_climb.")
             elif self.hc_metric is not None:
                 try:
                     _ = float(self.hc_metric(np.zeros((len(y_np), 1)), y_np))
@@ -173,40 +161,18 @@ class BackendMixin:
                     raise TypeError(
                         "In hill_climb mode, hc_metric must have signature hc_metric(X, y)."
                     ) from e
-            elif self.hc_metrics is not None:
-                probe_scores = {}
-                try:
-                    for name, fn in self.hc_metrics.items():
-                        probe_scores[name] = float(fn(np.zeros((len(y_np), 1)), y_np))
-                except TypeError as e:
-                    raise TypeError(
-                        "In hill_climb mode, each hc_metrics callable must have signature fn(X, y)."
-                    ) from e
-                try:
-                    _ = float(self.hc_metric_aggregator(probe_scores))
-                except TypeError as e:
-                    raise TypeError(
-                        "In hill_climb mode, hc_metric_aggregator must have signature agg(dict[str, float])."
-                    ) from e
 
         if self.search_mode == "hill_climb":
             return self._fit_hill_climb(df, y_np)
 
         if self.search_mode == "ga":
             if self.metrics is not None:
-                probe_scores = {}
                 try:
                     for name, fn in self.metrics.items():
-                        probe_scores[name] = float(fn(np.zeros(3), np.zeros(3)))
+                        _ = float(fn(np.zeros(3), np.zeros(3)))
                 except TypeError as e:
                     raise TypeError(
                         "In ga mode, each metrics callable must have signature fn(y_true, y_pred)."
-                    ) from e
-                try:
-                    _ = float(self.metric_aggregator(probe_scores))
-                except TypeError as e:
-                    raise TypeError(
-                        "In ga mode, metric_aggregator must have signature agg(dict[str, float])."
                     ) from e
             elif self.metric is not None:
                 try:
@@ -273,15 +239,24 @@ class BackendMixin:
             if mask.sum() < max(5, int(0.2 * len(y_np))):
                 return self._worst_fitness_tuple(len(individual))
 
-            metric_val = self._compute_single_metric(y_np[mask], pred[mask])
-            fitness_val = -metric_val if self.maximize_metric else metric_val
             age_pen = self._age_penalty(
                 birth_generation=getattr(individual, "birth_generation", generation_state["generation"]),
                 current_generation=generation_state["generation"],
             )
             novelty_pen = self._novelty_penalty(individual, elite_program_memory)
             incest_pen = self._incest_penalty(individual)
-            adjusted = fitness_val + self.parsimony_coefficient * len(individual) + age_pen + novelty_pen + incest_pen
+            shared_penalty = self.parsimony_coefficient * len(individual) + age_pen + novelty_pen + incest_pen
+            if self.enable_multi_objective and self.metrics is not None:
+                per_metric = self._compute_metric_scores(y_np[mask], pred[mask])
+                adjusted_vals = []
+                for metric_val in per_metric.values():
+                    base = -metric_val if self.maximize_metric else metric_val
+                    adjusted_vals.append(base + shared_penalty)
+                return tuple(adjusted_vals)
+
+            metric_val = self._compute_single_metric(y_np[mask], pred[mask])
+            fitness_val = -metric_val if self.maximize_metric else metric_val
+            adjusted = fitness_val + shared_penalty
             if self.enable_multi_objective:
                 return (adjusted, float(len(individual)))
             return (adjusted,)
