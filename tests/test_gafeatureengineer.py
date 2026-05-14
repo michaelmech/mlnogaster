@@ -4,7 +4,7 @@ import numpy as np
 import polars as pl
 from deap import base, creator, gp
 
-from GAfeatureengineer import GAFeatureEngineerDEAP
+from mlnogaster import GAFeatureEngineerDEAP
 
 
 def _tiny_df() -> pl.DataFrame:
