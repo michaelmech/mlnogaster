@@ -1,3 +1,4 @@
+import inspect
 from typing import Any, Optional
 
 import numpy as np
@@ -32,6 +33,14 @@ class BackendMixin:
                 f"Missing required columns for {context}: {missing}. "
                 f"Provided columns are: {list(df.columns)}."
             )
+
+    def _validate_callable_accepts_two_args(self, fn: Any, *, context: str) -> None:
+        try:
+            inspect.signature(fn).bind(np.zeros((1, 1)), np.zeros(1))
+        except TypeError as e:
+            raise TypeError(f"{context} must have signature {context}(X, y).") from e
+        except (ValueError, AttributeError):  # pragma: no cover - builtins or exotic callables
+            return
 
     def _worst_fitness_tuple(self, program_size: int) -> tuple[float, ...]:
         if self.enable_multi_objective:
@@ -155,12 +164,7 @@ class BackendMixin:
             elif self.hc_metric is None:
                 raise ValueError("Provide hc_metric when search_mode is hill_climb.")
             elif self.hc_metric is not None:
-                try:
-                    _ = float(self.hc_metric(np.zeros((len(y_np), 1)), y_np))
-                except TypeError as e:
-                    raise TypeError(
-                        "In hill_climb mode, hc_metric must have signature hc_metric(X, y)."
-                    ) from e
+                self._validate_callable_accepts_two_args(self.hc_metric, context="hc_metric")
 
         if self.search_mode == "hill_climb":
             return self._fit_hill_climb(df, y_np)
