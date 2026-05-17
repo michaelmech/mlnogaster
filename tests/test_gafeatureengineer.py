@@ -179,6 +179,54 @@ def test_hill_climb_checkpoint_write_and_resume(tmp_path):
     assert len(eng2.selected_programs_) >= 1
 
 
+def test_hill_climb_rejects_metric_with_wrong_signature():
+    df = _tiny_df()
+    y = np.array([1.0, 1.4, 1.9, 2.2, 2.3, 2.7], dtype=float)
+
+    def hc_metric(X):
+        return float(np.mean(X))
+
+    eng = GAFeatureEngineerDEAP(
+        search_mode="hill_climb",
+        hc_metric=hc_metric,
+        population_size=6,
+        generations=1,
+        hall_of_fame=1,
+        random_state=23,
+    )
+
+    try:
+        eng.fit(df, y)
+    except TypeError as e:
+        assert "hc_metric must have signature hc_metric(X, y)" in str(e)
+    else:
+        raise AssertionError("Expected wrong hc_metric signature to raise TypeError")
+
+
+def test_hill_climb_does_not_mask_type_error_inside_metric():
+    df = _tiny_df()
+    y = np.array([1.0, 1.4, 1.9, 2.2, 2.3, 2.7], dtype=float)
+
+    def hc_metric(X, y_true):
+        raise TypeError("inner metric failure")
+
+    eng = GAFeatureEngineerDEAP(
+        search_mode="hill_climb",
+        hc_metric=hc_metric,
+        population_size=6,
+        generations=1,
+        hall_of_fame=1,
+        random_state=23,
+    )
+
+    try:
+        eng.fit(df, y)
+    except TypeError as e:
+        assert str(e) == "inner metric failure"
+    else:
+        raise AssertionError("Expected inner hc_metric TypeError to propagate")
+
+
 def test_target_encoding_unseen_categories_are_null_on_transform():
     df_train = _tiny_df()
     y_train = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
